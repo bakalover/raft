@@ -3,8 +3,9 @@
 🥱 Yet another boring raft implementation, just for fun.
 
 ### Features
+- Frontend - HTTP
+- Backend - intracluster RPC calls via Go's std library
 - Load balancing using [HAProxy](https://www.haproxy.org/)
-- RPC calls using Go std library
 - Reconfiguration (may be implemented in future)
 - Simple text files as persistent storage
 
