@@ -6,6 +6,7 @@
 - Load balancing using [HAProxy](https://www.haproxy.org/)
 - RPC calls using Go std library
 - Reconfiguration (may be implemented in future)
+- Simple text files as persistent storage
 
 ### [Jmeter](https://jmeter.apache.org/) Metrics
 
