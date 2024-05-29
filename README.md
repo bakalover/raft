@@ -1,4 +1,4 @@
-## Raft
+# Raft
 🥱 Yet another boring raft implementation, just for fun.
 ___
 ### Features
