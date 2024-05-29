@@ -1,0 +1,36 @@
+syntax = "proto3";
+option go_package = "github.com/bakalover/raft/proto";
+
+message AppendEntriesArgs {
+  uint64 Term = 1;
+  string LeaderId = 2;
+  uint64 PrevLogIndex = 3;
+  uint64 PrevLogTerm = 4;
+  repeated string Entries = 5;
+  uint64 LeaderCommit = 6;
+}
+
+message AppendEntriesResult {
+  uint64 Term = 1;
+  bool Success = 2;
+}
+
+message RequestVoteArgs {
+  uint64 Term = 1;
+  string CandidateId = 2;
+  uint64 LastLogIndex = 3;
+  uint64 LastLogTerm = 4;
+}
+
+message RequestVoteResult {
+  uint64 Term = 1;
+  bool VoteGranted = 2;
+}
+
+message Empty {}
+
+service Node {
+  rpc RequestVote(RequestVoteArgs) returns (RequestVoteResult);
+  rpc AppendEntries(AppendEntriesArgs) returns (AppendEntriesResult);
+  rpc Nop(Empty) returns (Empty);
+}
