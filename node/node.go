@@ -9,6 +9,7 @@ type AppendEntriesArgs struct {
 	term         uint64
 	leaderId     string
 	prevLogIndex uint64
+	prevLogTerm  uint64
 	entries      []string
 	leaderCommit uint64
 }
@@ -19,7 +20,24 @@ type AppendEntriesResult struct {
 }
 
 func (n *Node) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesResult) error {
-	// TODO
+	currentTerm := n.state.termState.CurrentTerm()
+	if args.term < currentTerm {
+		reply.term = currentTerm
+		reply.success = false
+		return nil
+	}
+
+	term, _, err := n.state.log.NthEntry(args.prevLogIndex)
+
+	// Not found or found but term is not the same
+	if err != nil || term != args.prevLogTerm {
+		reply.term = currentTerm
+		reply.success = false
+		return nil
+	}
+
+	
+
 	return nil
 }
 
