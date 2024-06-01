@@ -1,103 +1,91 @@
 package node
 
 import (
-	"bufio"
-	"fmt"
-	"io"
-	"log"
-	"os"
-	"strconv"
-	"strings"
+	"gorm.io/gorm"
 )
 
-type Log struct {
-	persistentLog *os.File
-}
-
-func NewLog(name string) *Log {
-	_, err := os.Stat(name)
-
-	var file *os.File
-
-	if err != nil {
-		file, err = os.Create(name)
-		if err != nil {
-			log.Fatalf("Cannot create log file: %s", name)
-		}
-	} else {
-		file, err = os.OpenFile(name, os.O_RDWR, 0666)
-		if err != nil {
-			log.Fatalf("Cannot open log file: %s", name)
-		}
-	}
-	file.Seek(0, io.SeekEnd)
-	return &Log{persistentLog: file}
-}
-
-func (l *Log) NthEntry(index uint64) (uint64, string, error) {
-	scanner := bufio.NewScanner(l.persistentLog)
-	currIndex := uint64(0)
-
-	for scanner.Scan() {
-		currIndex++
-		if currIndex == index {
-			entry := strings.Split(scanner.Text(), " ")
-			term, _ := strconv.ParseUint(entry[0], 10, 64)
-			command := entry[1]
-			return term, command, nil
-		}
-	}
-	return 0, "", fmt.Errorf("no log entry found at index: %v", index)
+type LogEntry struct {
+	Index   uint64 `gorm:"primaryKey"`
+	Term    uint64
+	Command string
 }
 
 type TermState struct {
-	persistentTermState *os.File
+	CurrentTerm uint64
+	VotedFor    string
 }
 
-func (t *TermState) CurrentTerm() uint64 {
-	scanner := bufio.NewScanner(t.persistentTermState)
-	// Skip the first line
-	if scanner.Scan() {
-		// Read the second line
-		if scanner.Scan() {
-			currentTerm, err := strconv.ParseUint(scanner.Text(), 10, 64)
-			if err != nil {
-				log.Fatalf("Error converting line to integer: %v", err)
-			}
-			return currentTerm
-		} else {
-			panic("Inconsistent term file!")
-		}
+type PersistentState struct {
+	db *gorm.DB
+}
+
+func NewPersistentState(db *gorm.DB) *PersistentState {
+	state := &PersistentState{db}
+	state.Init()
+	return state
+}
+
+func (p *PersistentState) Init() {
+	if !p.db.Migrator().HasTable(&LogEntry{}) {
+		p.db.AutoMigrate(&LogEntry{})
 	}
-	panic("Inconsistent term file!")
+	if !p.db.Migrator().HasTable(&TermState{}) {
+		p.db.AutoMigrate(&TermState{})
+	}
 }
 
-func NewTermState(name string) *TermState {
-	_, err := os.Stat(name)
+func (p *PersistentState) ShutDown() {
+	p.db.Migrator().DropTable(&LogEntry{}, &TermState{})
+}
 
-	var file *os.File
+func (p *PersistentState) CurrentTerm() uint64 {
+	var el TermState
+	p.db.Model(&TermState{}).First(&el)
+	return el.CurrentTerm
+}
 
-	if err != nil {
-		file, err = os.Create(name)
-		if err != nil {
-			log.Fatalf("Cannot create term_state file: %s", name)
-		}
-		file.WriteString("NULL")
-		file.WriteString(strconv.FormatUint(0, 10))
+func (p *PersistentState) SetTerm(term uint64) {
+	var t TermState
+	p.db.Model(&TermState{}).First(&t)
+	t.CurrentTerm = term
+	p.db.Model(&TermState{}).Save(&t)
+}
+
+func (p *PersistentState) NthEntry(n uint64) *LogEntry {
+	var l LogEntry
+
+	r := p.db.
+		Model(&LogEntry{}).
+		Where("index = ?", n).
+		First(&l)
+
+	if r.Error != nil {
+		return nil
 	} else {
-		file, err = os.OpenFile(name, os.O_RDWR, 0666)
-		if err != nil {
-			log.Fatalf("Cannot open term_state file: %s", name)
-		}
+		return &l
 	}
-	return &TermState{persistentTermState: file}
+}
+
+func (p *PersistentState) ClearAbove(index uint64) {
+	p.db.
+		Model(&LogEntry{}).
+		Where("index > ?", index).
+		Delete(&LogEntry{})
+}
+
+func (p *PersistentState) Append(term uint64, lIndex uint64, entries []string) {
+	for _, entry := range entries {
+		p.db.
+			Model(&LogEntry{}).
+			Create(&LogEntry{Index: lIndex, Term: term, Command: entry})
+		lIndex++
+	}
 }
 
 type State struct {
-	termState   TermState
-	log         Log
-	commitIndex uint64
-	lastApplied uint64
-	nextIndex   []uint64
-	matchIndex  []uint64
+	persistentState *PersistentState
+	commitIndex     uint64
+	lastApplied     uint64
+	nextIndex       []uint64
+	matchIndex      []uint64
 }
