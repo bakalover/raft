@@ -26,10 +26,17 @@ type AppendEntriesResult struct {
 func (n *Node) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesResult) error {
 
 	ps := n.state.persistentState
-
 	currentTerm := ps.CurrentTerm()
+	reply.term = currentTerm
+
+	// Authority Heartbeat
+	if len(args.entries) == 0 {
+		//Reset election timer
+		reply.success = true
+		return nil
+	}
+
 	if args.term < currentTerm {
-		reply.term = currentTerm
 		reply.success = false
 		return nil
 	}
@@ -42,7 +49,6 @@ func (n *Node) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesResult
 	if args.prevLogIndex > 0 {
 		e := ps.NthEntry(args.prevLogIndex)
 		if e == nil || e.Term != args.prevLogTerm {
-			reply.term = currentTerm
 			reply.success = false
 			return nil
 		}
@@ -58,7 +64,6 @@ func (n *Node) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesResult
 		n.state.commitIndex = min(args.leaderCommit, args.prevLogIndex+uint64(len(args.entries)))
 	}
 
-	reply.term = currentTerm
 	reply.success = true
 	return nil
 }
@@ -113,7 +118,7 @@ func (n *Node) RequestVote(args *RequestVoteArgs, reply *RequestVoteResult) erro
 				return nil
 			}
 		}
-	
+
 		return nil
 	}
 }
