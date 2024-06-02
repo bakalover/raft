@@ -64,6 +64,14 @@ func (p *PersistentState) SetVotedFor(votedFor string) {
 	p.db.Model(&TermState{}).Save(&t)
 }
 
+func (p *PersistentState) Set(term uint64, votedFor string) {
+	var t TermState
+	p.db.Model(&TermState{}).First(&t)
+	t.VotedFor = votedFor
+	t.CurrentTerm = term
+	p.db.Model(&TermState{}).Save(&t)
+}
+
 func (p *PersistentState) NthEntry(n uint64) *LogEntry {
 	var l LogEntry
 

@@ -136,12 +136,14 @@ func (n *Node) RequestVote(args *RequestVoteArgs, reply *RequestVoteResult) erro
 
 		if args.lastLogTerm > lastEntry.Term {
 			reply.voteGranted = true
+			n.state.persistentState.Set(args.term, args.candidateId)
 			return nil
 		}
 
 		if args.lastLogTerm == lastEntry.Term {
 			if args.lastLogIndex >= lastEntry.Index {
 				reply.voteGranted = true
+				n.state.persistentState.SetVotedFor(args.candidateId)
 				return nil
 			} else {
 				reply.voteGranted = false
