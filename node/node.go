@@ -1,11 +1,32 @@
 package node
 
+import (
+	"math/rand"
+	"time"
+)
+
 const (
 	NullCanidateId = "nodeNull"
 )
 
 type Node struct {
-	state State
+	state         State
+	electionTimer time.Timer
+}
+
+func ElectionTimeout() time.Duration {
+	seconds := rand.Intn(2) + 2
+	milliseconds := rand.Intn(2000)
+	return time.Duration(seconds)*time.Second + time.Duration(milliseconds)*time.Millisecond
+}
+
+func (n *Node) ResetElectionTimer() {
+	n.electionTimer.Stop()
+	select {
+	case <-n.electionTimer.C:
+	default:
+	}
+	n.electionTimer.Reset(ElectionTimeout())
 }
 
 // =======================================Appending=======================================
@@ -31,7 +52,7 @@ func (n *Node) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesResult
 
 	// Authority Heartbeat
 	if len(args.entries) == 0 {
-		//Reset election timer
+		n.ResetElectionTimer()
 		reply.success = true
 		return nil
 	}
