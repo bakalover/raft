@@ -107,11 +107,3 @@ func (p *PersistentState) Append(term uint64, lIndex uint64, entries []string) {
 		lIndex++
 	}
 }
-
-type State struct {
-	persistentState *PersistentState
-	commitIndex     uint64
-	lastApplied     uint64
-	nextIndex       []uint64
-	matchIndex      []uint64
-}

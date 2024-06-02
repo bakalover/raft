@@ -9,6 +9,15 @@ const (
 	NullCanidateId = "nodeNull"
 )
 
+type State struct {
+	persistentState *PersistentState
+	commitIndex     uint64
+	lastApplied     uint64
+	nextIndex       []uint64
+	matchIndex      []uint64
+}
+
+
 type Node struct {
 	state         State
 	electionTimer time.Timer
