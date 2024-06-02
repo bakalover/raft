@@ -1,5 +1,9 @@
 package node
 
+const (
+	NullCanidateId = "nodeNull"
+)
+
 type Node struct {
 	state State
 }
@@ -67,7 +71,7 @@ type RequestVoteArgs struct {
 	term         uint64
 	candidateId  string
 	lastLogIndex uint64
-	lastLogterm  uint64
+	lastLogTerm  uint64
 }
 
 type RequestVoteResult struct {
@@ -75,9 +79,43 @@ type RequestVoteResult struct {
 	voteGranted bool
 }
 
-func (n *Node) ReqestVote(args *RequestVoteArgs, reply *RequestVoteResult) error {
-	// TODO
-	return nil
+func (n *Node) RequestVote(args *RequestVoteArgs, reply *RequestVoteResult) error {
+	currentTerm := n.state.persistentState.CurrentTerm()
+	reply.term = currentTerm
+
+	if args.term < currentTerm {
+		reply.voteGranted = false
+		return nil
+	} else {
+		votedFor := n.state.persistentState.VotedFor()
+		lastEntry := n.state.persistentState.LastEntry()
+		if (votedFor != NullCanidateId) && (votedFor != args.candidateId) {
+			reply.voteGranted = false
+			return nil
+		}
+
+		if args.lastLogTerm < lastEntry.Term {
+			reply.voteGranted = false
+			return nil
+		}
+
+		if args.lastLogTerm > lastEntry.Term {
+			reply.voteGranted = true
+			return nil
+		}
+
+		if args.lastLogTerm == lastEntry.Term {
+			if args.lastLogIndex >= lastEntry.Index {
+				reply.voteGranted = true
+				return nil
+			} else {
+				reply.voteGranted = false
+				return nil
+			}
+		}
+	
+		return nil
+	}
 }
 
 //========================================Voting=========================================

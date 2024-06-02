@@ -44,10 +44,23 @@ func (p *PersistentState) CurrentTerm() uint64 {
 	return el.CurrentTerm
 }
 
+func (p *PersistentState) VotedFor() string {
+	var el TermState
+	p.db.Model(&TermState{}).First(&el)
+	return el.VotedFor
+}
+
 func (p *PersistentState) SetTerm(term uint64) {
 	var t TermState
 	p.db.Model(&TermState{}).First(&t)
 	t.CurrentTerm = term
+	p.db.Model(&TermState{}).Save(&t)
+}
+
+func (p *PersistentState) SetVotedFor(votedFor string) {
+	var t TermState
+	p.db.Model(&TermState{}).First(&t)
+	t.VotedFor = votedFor
 	p.db.Model(&TermState{}).Save(&t)
 }
 
@@ -66,6 +79,18 @@ func (p *PersistentState) NthEntry(n uint64) *LogEntry {
 	}
 }
 
+func (p *PersistentState) LastEntry() *LogEntry {
+	var l LogEntry
+	r := p.db.
+		Model(&LogEntry{}).
+		Last(&l)
+	if r.Error != nil {
+		return nil
+	} else {
+		return &l
+	}
+}
+
 func (p *PersistentState) ClearAbove(index uint64) {
 	p.db.
 		Model(&LogEntry{}).
@@ -74,6 +99,7 @@ func (p *PersistentState) ClearAbove(index uint64) {
 }
 
 func (p *PersistentState) Append(term uint64, lIndex uint64, entries []string) {
+	// Raft insures safety even if node dies while appending
 	for _, entry := range entries {
 		p.db.
 			Model(&LogEntry{}).
