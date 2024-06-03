@@ -219,7 +219,7 @@ func (n *Node) ConnectRPC() {
 }
 
 func (n *Node) ElectionProcess() {
-	quorum := n.ids/2 + 1 // Includes caller; n.ids % 2 == 1
+	quorum := n.ids/2 + 1 // Includes caller (NO CHANGE IT FIRSTRLY VOTE FOR SELF THEN TIMNER THEN OTHERS); n.ids % 2 == 1
 
 	ps := n.state.persistentState
 
@@ -240,6 +240,8 @@ func (n *Node) ElectionProcess() {
 		// in case when quorum is gathered and there more granted votes
 		// Checkout (!!)
 		countVote := make(chan struct{}, n.ids)
+		
+		n.ResetElectionTimer()
 
 		for id := range n.ids {
 			term := ps.CurrentTerm()
@@ -294,8 +296,6 @@ func (n *Node) ElectionProcess() {
 				}
 			}
 		}()
-
-		n.ResetElectionTimer()
 	}
 }
 
