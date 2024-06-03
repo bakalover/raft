@@ -1,6 +1,11 @@
 package node
 
 import (
+	"fmt"
+	"log"
+	"os"
+
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
@@ -19,8 +24,20 @@ type PersistentState struct {
 	db *gorm.DB
 }
 
-func NewPersistentState(db *gorm.DB) *PersistentState {
-	state := &PersistentState{db}
+func NewPersistentState() *PersistentState {
+	dsn := fmt.Sprintf(
+		"host=%v user=%v password=%v dbname=%v port=%v sslmode=disable",
+		os.Getenv("PG_HOST"),
+		os.Getenv("PG_USER"),
+		os.Getenv("PG_PASS"),
+		os.Getenv("PG_DB"),
+		os.Getenv("PG_PORT"),
+	)
+	conn, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		log.Fatalf("cannot establish connection to database: %v", err)
+	}
+	state := &PersistentState{conn}
 	state.Init()
 	return state
 }
@@ -32,6 +49,7 @@ func (p *PersistentState) Init() {
 	if !p.db.Migrator().HasTable(&TermState{}) {
 		p.db.AutoMigrate(&TermState{})
 	}
+	p.Set(0, NullCanidateId)
 }
 
 func (p *PersistentState) ShutDown() {
@@ -42,6 +60,13 @@ func (p *PersistentState) CurrentTerm() uint64 {
 	var el TermState
 	p.db.Model(&TermState{}).First(&el)
 	return el.CurrentTerm
+}
+
+func (p *PersistentState) IncremenTerm() {
+	var el TermState
+	p.db.Model(&TermState{}).First(&el)
+	el.CurrentTerm++
+	p.db.Model(&TermState{}).Save(&el)
 }
 
 func (p *PersistentState) VotedFor() string {
