@@ -25,11 +25,11 @@ type State struct {
 type Node struct {
 	id  int
 	ids int
-	// Protect rpcClients
+	// Protect reconnClients
 	mu sync.Mutex
-	// Transfer info about which rpc connection is needed to be established again
-	rpcC          chan int
-	rpcClients    []*rpc.Client
+	// Transfer info about which nodes is down (ids) and need to be reconnected
+	reconnC       chan int
+	reconnClients []*rpc.Client
 	state         *State
 	electionTimer time.Timer
 }
@@ -38,8 +38,8 @@ func NewNode(id int, ids int) *Node {
 	countWithoutMe := ids - 1
 	nextIndex := make([]uint64, countWithoutMe)
 	matchIndex := make([]uint64, countWithoutMe)
-	rpcClients := make([]*rpc.Client, countWithoutMe)
-	rpcC := make(chan int)
+	reconnClients := make([]*rpc.Client, countWithoutMe)
+	reconnC := make(chan int)
 
 	for i := range countWithoutMe {
 		nextIndex[i] = 1
@@ -56,11 +56,11 @@ func NewNode(id int, ids int) *Node {
 	}
 
 	return &Node{
-		id:         id,
-		ids:        ids,
-		rpcClients: rpcClients,
-		rpcC:       rpcC,
-		state:      state,
+		id:            id,
+		ids:           ids,
+		reconnClients: reconnClients,
+		reconnC:       reconnC,
+		state:         state,
 	}
 }
 
@@ -205,98 +205,105 @@ func (n *Node) RequestVote(args *RequestVoteArgs, reply *RequestVoteResult) erro
 
 // Recieve recconnection signals via chan
 func (n *Node) ConnectRPC() {
-	for id := range n.rpcC {
+	for id := range n.reconnC {
 		var client *rpc.Client
 		var err error
 		for client, err = rpc.Dial("tcp", "node"+string(id)+":8080"); err != nil; {
-			log.Println("error connecting to server node%v via RPC", id)
+			log.Printf("error connecting to server node%v via RPC", id)
 			time.Sleep(5 * time.Millisecond)
 		}
 		n.mu.Lock()
-		n.rpcClients[id] = client
+		n.reconnClients[id] = client
 		n.mu.Unlock()
 	}
 }
 
 func (n *Node) ElectionProcess() {
 	quorum := n.ids/2 + 1 // Includes caller (NO CHANGE IT FIRSTRLY VOTE FOR SELF THEN TIMNER THEN OTHERS); n.ids % 2 == 1
-
 	ps := n.state.persistentState
 
-	for {
-		electedC := make(chan struct{}) // Signals that quorum was fulfilled
+	// Wait for election timeout
+	<-n.electionTimer.C
 
-		select {
-		case <-n.electionTimer.C:
+	// Transit state
+	ps.IncremenTerm()
+	n.state.role.Exchange(Candidate)
 
-		case <-electedC:
-			//TODO
-		}
+	// Buffer prevents deadlock that leads to memory leak:
+	// In case when quorum is gathered and there more granted votes
+	// Checkout (!!)
+	countVote := make(chan struct{}, n.ids)
 
-		ps.IncremenTerm()
-		n.state.role.Exchange(Candidate)
-
-		// Buffer prevents deadlock(aka memory leak):
-		// in case when quorum is gathered and there more granted votes
-		// Checkout (!!)
-		countVote := make(chan struct{}, n.ids)
-		
-		n.ResetElectionTimer()
-
-		for id := range n.ids {
-			term := ps.CurrentTerm()
-			last := ps.LastEntry()
-			var lastLogTerm uint64
-			var lastLogIndex uint64
-
-			if last == nil {
-				lastLogIndex = 0
-				lastLogTerm = 0
-			} else {
-				lastLogIndex = last.Index
-				lastLogTerm = last.Term
-			}
-
-			args := &RequestVoteArgs{
-				term:         term,
-				candidateId:  string(n.id),
-				lastLogIndex: lastLogIndex,
-				lastLogTerm:  lastLogTerm,
-			}
-
-			var wg sync.WaitGroup
-			wg.Add(quorum)
-
-			go func(id int) {
-				var reply RequestVoteResult
-				n.rpcClients[id].Call("Node.RequestVote", args, &reply) // Retry if fail???????
-				if reply.voteGranted {
-					countVote <- struct{}{} // (!!)
-				} else {
-					if term < reply.term {
-						ps.SetTerm(reply.term)
-					}
-				}
-			}(id)
-		}
-
-		go func() {
-			gotVotes := 0
-		loop:
-			for {
-				select {
-				case <-countVote:
-					gotVotes++
-					if gotVotes >= quorum {
-						electedC <- struct{}{}
-						break loop
-					}
-				case <-n.electionTimer.C:
-					break loop
-				}
-			}
-		}()
+	// Prepare RPC args
+	term := ps.CurrentTerm()
+	last := ps.LastEntry()
+	var lastLogTerm uint64
+	var lastLogIndex uint64
+	if last == nil {
+		lastLogIndex = 0
+		lastLogTerm = 0
+	} else {
+		lastLogIndex = last.Index
+		lastLogTerm = last.Term
 	}
+	args := &RequestVoteArgs{
+		term:         term,
+		candidateId:  string(n.id),
+		lastLogIndex: lastLogIndex,
+		lastLogTerm:  lastLogTerm,
+	}
+
+	// Begin election process
+	// If timeout occures -> transit into next term and then retry election
+	n.ResetElectionTimer()
+	for id := range n.ids {
+		go func(id int) {
+			var reply RequestVoteResult
+
+			// Semi-bottleneck =( ; .Go(...) partly neutralizes mutex effect
+			n.mu.Lock()
+			call := n.reconnClients[id].Go("Node.RequestVote", args, &reply, nil)
+			n.mu.Unlock()
+
+			<-call.Done
+			if call.Error != nil {
+				n.reconnC <- id
+				return // This RequestVote call failed, no retries
+			}
+
+			if reply.voteGranted {
+				countVote <- struct{}{} // (!!) May blocks forever without buffer!!
+			} else {
+
+				//	Diffent rpc calls may rewrite persistent term
+				//	So we are facing some race here
+				//	To prevent such thing we use thread-safe calling to persistent state before each(multiple calls) comparison
+				// 	Obviously it leads to performace decreasing =(
+				if ps.CurrentTerm() < reply.term {
+					ps.SetTerm(reply.term)
+				}
+			}
+		}(id)
+	}
+
+	gotVotes := 0
+
+loop:
+	for {
+		select {
+		case <-countVote:
+			gotVotes++
+			if gotVotes >= quorum {
+				n.state.role.Exchange(Leader)
+				break loop
+			}
+		case <-n.electionTimer.C:
+			n.ResetElectionTimer()
+			go n.ElectionProcess() // AsYnc ReCuRSioN)) ; Just starting another election if that fails
+			break loop
+		}
+	}
+
 }
 
 func (n *Node) BootRun() {
@@ -332,7 +339,7 @@ func (n *Node) BootRun() {
 	go n.ConnectRPC()
 
 	for id := range n.ids {
-		n.rpcC <- id
+		n.reconnC <- id
 	}
 
 	n.ResetElectionTimer()
