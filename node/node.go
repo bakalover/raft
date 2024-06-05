@@ -220,12 +220,9 @@ func (n *Node) ConnectRPC() {
 
 type Vote struct{}
 
-func (n *Node) ElectionProcess() {
+func (n *Node) ImmediateElection() {
 	quorum := n.ids/2 + 1 // Includes caller (NO CHANGE IT FIRSTRLY VOTE FOR SELF THEN TIMNER THEN OTHERS); n.ids % 2 == 1
 	ps := n.state.persistentState
-
-	// Wait for election timeout
-	<-n.electionTimer.C
 
 	// Transit state
 	ps.IncremenTerm()
@@ -255,9 +252,7 @@ func (n *Node) ElectionProcess() {
 	n.ResetElectionTimer()
 	for id := range n.ids {
 		go func(id int) {
-
 			reply := new(RequestVoteResult)
-
 			// Semi-bottleneck =( ; .Go(...) partly neutralizes mutex effect
 			n.reconnMu.Lock()
 			call := n.reconnClients[id].Go("Node.RequestVote", args, reply, nil)
@@ -268,7 +263,6 @@ func (n *Node) ElectionProcess() {
 				n.reconnC <- id // Request reconnection to node
 				return          // This RequestVote call failed, no retries
 			}
-
 			if reply.voteGranted {
 				countVote <- Vote{} // (!) May blocks forever without buffer!!
 			} else {
@@ -291,20 +285,27 @@ loop:
 			gotVotes++
 			if gotVotes >= quorum {
 				n.state.role.Exchange(Leader)
-				// Authority heatbeat in separate goroutine???
-				// Append entries with reseting timer on each send????
-				go n.ElectionProcess() // Launch new election process that will await timer reseting
+				go n.Replicate() // Start replication
 				break loop
 			}
 		case <-n.electionTimer.C:
-			// Just starting another IMIDIATE election if that fails
-			// Reset timer now
-			n.ResetElectionTimer()
-			go n.ElectionProcess() // AsYnc ReCuRSioN)) ;
+			// Just starting another IMMEDIATE election if that fails
+			go n.ImmediateElection() // Seems like AsYnc ReCuRSioN =)) ;
 			break loop
 		}
 	}
 
+}
+
+func (n *Node) TimeoutElection() {
+	n.ResetElectionTimer()
+	<-n.electionTimer.C
+	n.ImmediateElection()
+}
+
+func (n *Node) Replicate() {
+	// Authority heatbeat in separate goroutine???
+	// Append entries with reseting timer on each send????
 }
 
 func (n *Node) BootRun() {
@@ -333,7 +334,7 @@ func (n *Node) BootRun() {
 
 	go http.ListenAndServe("node"+string(n.id)+":8080", nil)
 
-	//	First of all we need to establish rpc connection
+	//	First of all we need to establish rpc connections
 	// 	with all nodes (incuding caller)
 	// 	We will use that subroutine to reconnect rpc via channel signal
 	//	if we encounter node death
@@ -343,6 +344,5 @@ func (n *Node) BootRun() {
 		n.reconnC <- id
 	}
 
-	n.ResetElectionTimer()
-	go n.ElectionProcess()
+	go n.TimeoutElection()
 }
