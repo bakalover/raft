@@ -203,7 +203,7 @@ func (n *Node) RequestVote(args *RequestVoteArgs, reply *RequestVoteResult) erro
 
 //========================================Voting=========================================
 
-// Recieve recconnection signals via chan
+// Recieve reconnection signals via chan
 func (n *Node) ConnectRPC() {
 	for id := range n.reconnC {
 		var client *rpc.Client
@@ -267,8 +267,8 @@ func (n *Node) ElectionProcess() {
 
 			<-call.Done
 			if call.Error != nil {
-				n.reconnC <- id
-				return // This RequestVote call failed, no retries
+				n.reconnC <- id // Request reconnection to node
+				return          // This RequestVote call failed, no retries
 			}
 
 			if reply.voteGranted {
@@ -287,7 +287,6 @@ func (n *Node) ElectionProcess() {
 	}
 
 	gotVotes := 0
-
 loop:
 	for {
 		select {
@@ -295,11 +294,16 @@ loop:
 			gotVotes++
 			if gotVotes >= quorum {
 				n.state.role.Exchange(Leader)
+				// Authority heatbeat in separate goroutine???
+				// Append entries with reseting timer on each send????
+				go n.ElectionProcess() // Launch new election process that will await timer reseting
 				break loop
 			}
 		case <-n.electionTimer.C:
+			// Just starting another IMIDIATE election if that fails
+			// Reset timer now
 			n.ResetElectionTimer()
-			go n.ElectionProcess() // AsYnc ReCuRSioN)) ; Just starting another election if that fails
+			go n.ElectionProcess() // AsYnc ReCuRSioN)) ;
 			break loop
 		}
 	}
