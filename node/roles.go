@@ -12,10 +12,6 @@ type RoleStateMachine struct {
 	state atomic.Uint32
 }
 
-func NewRoleStateMachine() *RoleStateMachine {
-	return &RoleStateMachine{state: atomic.Uint32{}} // Init with "zero value" == Follower
-}
-
 func (t *RoleStateMachine) Exchange(to uint32) {
 	t.state.Swap(to)
 }

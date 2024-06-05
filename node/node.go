@@ -47,7 +47,7 @@ func NewNode(id int, ids int) *Node {
 	}
 
 	state := &State{
-		role:            NewRoleStateMachine(),
+		role:            new(RoleStateMachine),
 		persistentState: NewPersistentState(),
 		commitIndex:     0,
 		lastApplied:     0,
@@ -290,7 +290,7 @@ func (n *Node) ImmediateElection() {
 			}
 		case <-n.electionTimer.C:
 			// Just starting another Immediate election if that fails
-			// In case there is Follower state (stored during parallel AppendEmtries call -> start DefferedElection)
+			// In case there is Follower state (stored during parallel AppendEmtries call -> start Deffered Election)
 			if n.state.role.Load() == Follower {
 				go n.DefferedElection()
 			} else {
