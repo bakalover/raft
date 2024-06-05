@@ -221,7 +221,7 @@ func (n *Node) ConnectRPC() {
 type Vote struct{}
 
 func (n *Node) ImmediateElection() {
-	quorum := n.ids/2 + 1 // Includes caller (NO CHANGE IT FIRSTRLY VOTE FOR SELF THEN TIMNER THEN OTHERS); n.ids % 2 == 1
+	quorum := (n.ids - 1) / 2 //n.ids % 2 == 1
 	ps := n.state.persistentState
 
 	// Transit state
