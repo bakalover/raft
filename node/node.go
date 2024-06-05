@@ -26,7 +26,7 @@ type Node struct {
 	id  int
 	ids int
 	// Protect reconnClients
-	mu sync.Mutex
+	reconnMu sync.Mutex
 	// Transfer info about which nodes is down (ids) and need to be reconnected
 	reconnC       chan int
 	reconnClients []*rpc.Client
@@ -212,11 +212,13 @@ func (n *Node) ConnectRPC() {
 			log.Printf("error connecting to server node%v via RPC", id)
 			time.Sleep(5 * time.Millisecond)
 		}
-		n.mu.Lock()
+		n.reconnMu.Lock()
 		n.reconnClients[id] = client
-		n.mu.Unlock()
+		n.reconnMu.Unlock()
 	}
 }
+
+type Vote struct{}
 
 func (n *Node) ElectionProcess() {
 	quorum := n.ids/2 + 1 // Includes caller (NO CHANGE IT FIRSTRLY VOTE FOR SELF THEN TIMNER THEN OTHERS); n.ids % 2 == 1
@@ -232,7 +234,7 @@ func (n *Node) ElectionProcess() {
 	// Buffer prevents deadlock that leads to memory leak:
 	// In case when quorum is gathered and there more granted votes
 	// Checkout (!)
-	countVote := make(chan struct{}, n.ids)
+	countVote := make(chan Vote, n.ids)
 
 	// Prepare RPC args
 	term := ps.CurrentTerm()
@@ -253,12 +255,13 @@ func (n *Node) ElectionProcess() {
 	n.ResetElectionTimer()
 	for id := range n.ids {
 		go func(id int) {
-			var reply RequestVoteResult
+
+			reply := new(RequestVoteResult)
 
 			// Semi-bottleneck =( ; .Go(...) partly neutralizes mutex effect
-			n.mu.Lock()
-			call := n.reconnClients[id].Go("Node.RequestVote", args, &reply, nil)
-			n.mu.Unlock()
+			n.reconnMu.Lock()
+			call := n.reconnClients[id].Go("Node.RequestVote", args, reply, nil)
+			n.reconnMu.Unlock()
 
 			<-call.Done
 			if call.Error != nil {
@@ -267,10 +270,8 @@ func (n *Node) ElectionProcess() {
 			}
 
 			if reply.voteGranted {
-				countVote <- struct{}{} // (!) May blocks forever without buffer!!
+				countVote <- Vote{} // (!) May blocks forever without buffer!!
 			} else {
-
-				//	(*)
 				//	Diffent rpc calls may rewrite persistent term
 				//	So we are facing some race here
 				//	To prevent such thing we use thread-safe persistent storage
