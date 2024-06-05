@@ -1,3 +1,5 @@
+github.com/bakalover/tate v0.2.2 h1:w+aRx19JS4w8ItY+EkE/9j6ezsQrL9cG9ygFkBvau3c=
+github.com/bakalover/tate v0.2.2/go.mod h1:8ZtVaUiXguxpE6KvyaK0UJxoGUsylTM5UPTDd/5fJmQ=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/jackc/pgpassfile v1.0.0 h1:/6Hmqy13Ss2zCq62VdNG8tM1wchn8zjSGOBJ6icpsIM=
 github.com/jackc/pgpassfile v1.0.0/go.mod h1:CEx0iS5ambNFdcRtxPj5JhEz+xB6uRky5eyVu/W2HEg=
