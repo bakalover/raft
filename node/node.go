@@ -365,7 +365,7 @@ func (n *Node) Replicate() {
 		}
 	})
 
-	// Appending
+	// TODO Appending
 
 }
 
