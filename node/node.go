@@ -272,13 +272,13 @@ func (n *Node) ImmediateElection() {
 				// 	Performance negative impact =(
 				if ps.CurrentTerm() < reply.term {
 					ps.SetTerm(reply.term)
+					n.state.role.Exchange(Follower) // Discover new Term
 				}
 			}
 		}(id)
 	}
 
 	gotVotes := 0
-loop:
 	for {
 		select {
 		case <-countVote:
@@ -286,19 +286,25 @@ loop:
 			if gotVotes >= quorum {
 				n.state.role.Exchange(Leader)
 				go n.Replicate() // Start replication
-				break loop
+				return
 			}
 		case <-n.electionTimer.C:
-			// Just starting another IMMEDIATE election if that fails
-			go n.ImmediateElection() // Seems like AsYnc ReCuRSioN =)) ;
-			break loop
+			// Just starting another Immediate election if that fails
+			// In case there is Follower state (stored during parallel AppendEmtries call -> start DefferedElection)
+			if n.state.role.Load() == Follower {
+				go n.DefferedElection()
+			} else {
+				go n.ImmediateElection() // Seems like AsYnc ReCuRSioN =)) ;
+			}
+			return
 		}
 	}
 
 }
 
-func (n *Node) TimeoutElection() {
+func (n *Node) DefferedElection() {
 	n.ResetElectionTimer()
+	// Other goroutines may also reset timer several or infinite times
 	<-n.electionTimer.C
 	n.ImmediateElection()
 }
@@ -344,5 +350,5 @@ func (n *Node) BootRun() {
 		n.reconnC <- id
 	}
 
-	go n.TimeoutElection()
+	go n.DefferedElection()
 }
