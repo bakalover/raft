@@ -113,15 +113,14 @@ func (p *PersistentState) NthEntry(n uint64) *LogEntry {
 }
 
 func (p *PersistentState) LastEntry() *LogEntry {
-	var l LogEntry
-	r := p.db.
+	le := new(LogEntry)
+
+	// If there is no log entry -> "zero value" is already here
+	p.db.
 		Model(&LogEntry{}).
-		Last(&l)
-	if r.Error != nil {
-		return nil
-	} else {
-		return &l
-	}
+		Last(&le)
+
+	return le
 }
 
 func (p *PersistentState) ClearAbove(index uint64) {

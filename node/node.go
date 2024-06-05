@@ -231,21 +231,16 @@ func (n *Node) ElectionProcess() {
 
 	// Buffer prevents deadlock that leads to memory leak:
 	// In case when quorum is gathered and there more granted votes
-	// Checkout (!!)
+	// Checkout (!)
 	countVote := make(chan struct{}, n.ids)
 
 	// Prepare RPC args
 	term := ps.CurrentTerm()
 	last := ps.LastEntry()
-	var lastLogTerm uint64
-	var lastLogIndex uint64
-	if last == nil {
-		lastLogIndex = 0
-		lastLogTerm = 0
-	} else {
-		lastLogIndex = last.Index
-		lastLogTerm = last.Term
-	}
+
+	lastLogIndex := last.Index
+	lastLogTerm := last.Term
+
 	args := &RequestVoteArgs{
 		term:         term,
 		candidateId:  string(n.id),
@@ -272,13 +267,14 @@ func (n *Node) ElectionProcess() {
 			}
 
 			if reply.voteGranted {
-				countVote <- struct{}{} // (!!) May blocks forever without buffer!!
+				countVote <- struct{}{} // (!) May blocks forever without buffer!!
 			} else {
 
+				//	(*)
 				//	Diffent rpc calls may rewrite persistent term
 				//	So we are facing some race here
-				//	To prevent such thing we use thread-safe calling to persistent state before each(multiple calls) comparison
-				// 	Obviously it leads to performace decreasing =(
+				//	To prevent such thing we use thread-safe persistent storage
+				// 	Performance negative impact =(
 				if ps.CurrentTerm() < reply.term {
 					ps.SetTerm(reply.term)
 				}
