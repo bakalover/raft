@@ -301,7 +301,7 @@ func (n *Node) ImmediateElection() {
 			}
 		case <-n.electionTimer.C:
 			// Just starting another Immediate election if that fails
-			// In case there is Follower state (stored during parallel AppendEmtries call -> start Deffered Election)
+			// In case there is Follower state (stored during parallel AppendEntries call -> start Deffered Election)
 			if n.state.role.Load() == Follower {
 				n.scope.Go(func() { n.DefferedElection() })
 			} else {
@@ -321,6 +321,13 @@ func (n *Node) DefferedElection() {
 }
 
 func (n *Node) Replicate() {
+
+	// Reinitialized after election
+	lastIndex := n.state.persistentState.LastEntry().Index
+	for i := range len(n.state.nextIndex) {
+		n.state.nextIndex[i] = lastIndex + 1
+		n.state.matchIndex[i] = 0
+	}
 
 	//Authority Heartbeats
 	n.scope.Go(func() {
@@ -413,5 +420,10 @@ func (n *Node) BootRun() {
 		s.Go(func() {
 			n.DefferedElection()
 		})
+
+		s.Go(func() {
+			// TODO n.LogCompaction()
+		})
+
 	})
 }
