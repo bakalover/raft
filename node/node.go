@@ -33,6 +33,8 @@ type Node struct {
 	// Transfer info about which nodes is down (ids) and need to be reconnected
 	reconnC       chan int
 	reconnClients []*rpc.Client
+	// Channel for clients commands
+	clientC       chan string
 	state         *State
 	electionTimer time.Timer
 }
@@ -65,6 +67,18 @@ func NewNode(id int, ids int) *Node {
 		reconnC:       reconnC,
 		state:         state,
 	}
+}
+
+func (n *Node) UpdateClient(id int, c *rpc.Client) {
+	n.reconnMu.Lock()
+	defer n.reconnMu.Unlock()
+	n.reconnClients[id] = c
+}
+
+func (n *Node) GetClient(id int) *rpc.Client {
+	n.reconnMu.Lock()
+	defer n.reconnMu.Unlock()
+	return n.reconnClients[id]
 }
 
 func ElectionTimeout() time.Duration {
@@ -212,20 +226,20 @@ func (n *Node) RequestVote(args *RequestVoteArgs, reply *RequestVoteResult) erro
 
 // Recieve reconnection signals via chan
 func (n *Node) ConnectRPC() {
+	var (
+		client *rpc.Client
+		err    error
+	)
 	for id := range n.reconnC {
-		var client *rpc.Client
-		var err error
 		for client, err = rpc.Dial("tcp", "node"+string(id)+":8080"); err != nil; {
 			log.Printf("error connecting to server node%v via RPC", id)
 			time.Sleep(5 * time.Millisecond)
 		}
-		n.reconnMu.Lock()
-		n.reconnClients[id] = client
-		n.reconnMu.Unlock()
+		n.UpdateClient(id, client)
 	}
 }
 
-type Vote struct{}
+type Vote struct{} // Sugar
 
 func (n *Node) ImmediateElection() {
 	quorum := (n.ids - 1) / 2 //n.ids % 2 == 1
@@ -263,10 +277,8 @@ func (n *Node) ImmediateElection() {
 			localId := id
 			s.Go(func() {
 				reply := new(RequestVoteResult)
-				// Semi-bottleneck =( ; .Go(...) partly neutralizes mutex effect
-				n.reconnMu.Lock()
-				call := n.reconnClients[localId].Go("Node.RequestVote", args, reply, nil)
-				n.reconnMu.Unlock()
+				// Semi-bottleneck =( ; .Go(...) partly neutralizes mutex effect inside Get(Client)
+				call := n.GetClient(localId).Go("Node.RequestVote", args, reply, nil)
 
 				<-call.Done
 				if call.Error != nil {
@@ -333,7 +345,8 @@ func (n *Node) Replicate() {
 	n.scope.Go(func() {
 		ti := time.NewTicker(500 * time.Millisecond)
 		emptyArgs := new(AppendEntriesArgs)
-		stopC := make(chan struct{})
+		stopBeatsC := make(chan struct{}, n.ids)
+
 		for {
 			select {
 			case <-ti.C:
@@ -343,10 +356,7 @@ func (n *Node) Replicate() {
 						s.Go(
 							func() {
 								reply := new(AppendEntriesResult)
-								n.reconnMu.Lock()
-								call := n.reconnClients[localId].Go("Node.AppendEntries", emptyArgs, reply, nil)
-								n.reconnMu.Unlock()
-
+								call := n.GetClient(localId).Go("Node.AppendEntries", emptyArgs, reply, nil)
 								<-call.Done
 								if call.Error != nil {
 									n.reconnC <- id // Request reconnection to node
@@ -357,8 +367,7 @@ func (n *Node) Replicate() {
 									ps := n.state.persistentState
 									if ps.CurrentTerm() < reply.term {
 										ps.SetTerm(reply.term)
-										n.state.role.Exchange(Follower)
-										stopC <- struct{}{}
+										stopBeatsC <- struct{}{}
 									}
 								}
 							},
@@ -366,14 +375,60 @@ func (n *Node) Replicate() {
 					}
 				})
 
-			case <-stopC:
+			case <-stopBeatsC:
+				n.state.role.Exchange(Follower)
+				n.scope.Go(func() { n.DefferedElection() })
 				return
 			}
 		}
 	})
 
-	// TODO Appending
+	tate.FixScope(func(s *tate.Scope) {
 
+		for upd := range n.clientC {
+			ps := n.state.persistentState
+			entries := []string{upd} // TODO: batches
+			term := ps.CurrentTerm()
+			last := ps.LastEntry()
+
+			ps.Append(term, last.Index+1, entries)
+
+			args := &AppendEntriesArgs{
+				term:         ps.CurrentTerm(),
+				leaderId:     string(n.id),
+				prevLogIndex: last.Index,
+				prevLogTerm:  last.Term,
+				entries:      entries,
+				leaderCommit: n.state.commitIndex,
+			}
+
+			for id := range n.ids {
+				client := n.GetClient(id)
+				s.Go(
+					func() {
+						reply := new(AppendEntriesResult)
+						for {
+							err := client.Call("Node.AppendEntries", args, reply)
+							if err != nil {
+								n.reconnC <- id
+								return
+							}
+							if !reply.success {
+								ps := n.state.persistentState
+								if ps.CurrentTerm() < reply.term {
+									ps.SetTerm(reply.term)
+									n.state.role.Exchange(Follower)
+									stopC <- struct{}{}
+								} else {
+									continue // Send again
+								}
+							}
+						}
+					},
+				)
+			}
+		}
+	})
 }
 
 func (n *Node) BootRun() {
