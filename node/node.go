@@ -20,6 +20,7 @@ type State struct {
 	persistentState *PersistentState
 	commitIndex     uint64
 	lastApplied     uint64
+	stateMu         sync.Mutex
 	nextIndex       []uint64
 	matchIndex      []uint64
 }
@@ -28,9 +29,9 @@ type Node struct {
 	id    int
 	ids   int
 	scope *tate.Scope
-	// Protect reconnClients
+	// Protects reconnClients
 	reconnMu sync.Mutex
-	// Transfer info about which nodes is down (ids) and need to be reconnected
+	// Transfers info about which nodes is down (ids) and need to be reconnected
 	reconnC       chan int
 	reconnClients []*rpc.Client
 	// Channel for clients commands
@@ -118,7 +119,7 @@ func (n *Node) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesResult
 	reply.term = currentTerm
 
 	// Authority Heartbeat
-	if len(args.entries) == 0 {
+	if args.entries == nil {
 		n.ResetElectionTimer()
 		if args.term < currentTerm {
 			reply.success = false
@@ -246,7 +247,7 @@ func (n *Node) ImmediateElection() {
 	ps := n.state.persistentState
 
 	// Transit state
-	ps.IncremenTerm()
+	term := ps.IncrementAndFetchTerm()
 	n.state.role.Exchange(Candidate)
 
 	// Buffer prevents deadlock that leads to memory leak:
@@ -255,7 +256,6 @@ func (n *Node) ImmediateElection() {
 	countVote := make(chan Vote, n.ids)
 
 	// Prepare RPC args
-	term := ps.CurrentTerm()
 	last := ps.LastEntry()
 
 	lastLogIndex := last.Index
@@ -334,22 +334,26 @@ func (n *Node) DefferedElection() {
 
 func (n *Node) Replicate() {
 
-	// Reinitialized after election
 	lastIndex := n.state.persistentState.LastEntry().Index
+
+	// Reinitialized after election
+	n.state.stateMu.Lock()
 	for i := range len(n.state.nextIndex) {
 		n.state.nextIndex[i] = lastIndex + 1
 		n.state.matchIndex[i] = 0
 	}
+	n.state.stateMu.Unlock()
 
-	//Authority Heartbeats
+	// Authority Heartbeats
 	n.scope.Go(func() {
-		ti := time.NewTicker(500 * time.Millisecond)
+		ti := time.NewTicker(200 * time.Millisecond)
 		emptyArgs := new(AppendEntriesArgs)
 		stopBeatsC := make(chan struct{}, n.ids)
 
 		for {
 			select {
 			case <-ti.C:
+
 				tate.FixScope(func(s *tate.Scope) {
 					for id := range n.ids {
 						localId := id
@@ -394,7 +398,7 @@ func (n *Node) Replicate() {
 			ps.Append(term, last.Index+1, entries)
 
 			args := &AppendEntriesArgs{
-				term:         ps.CurrentTerm(),
+				term:         term,
 				leaderId:     string(n.id),
 				prevLogIndex: last.Index,
 				prevLogTerm:  last.Term,
@@ -404,28 +408,37 @@ func (n *Node) Replicate() {
 
 			for id := range n.ids {
 				client := n.GetClient(id)
-				s.Go(
-					func() {
-						reply := new(AppendEntriesResult)
-						for {
-							err := client.Call("Node.AppendEntries", args, reply)
-							if err != nil {
-								n.reconnC <- id
-								return
-							}
-							if !reply.success {
-								ps := n.state.persistentState
-								if ps.CurrentTerm() < reply.term {
-									ps.SetTerm(reply.term)
-									n.state.role.Exchange(Follower)
-									stopC <- struct{}{}
-								} else {
-									continue // Send again
-								}
-							}
+				localId := id
+				s.Go(func() {
+					reply := new(AppendEntriesResult)
+					for {
+						err := client.Call("Node.AppendEntries", args, reply)
+						if err != nil {
+							n.reconnC <- localId
+							return
 						}
-					},
-				)
+						if !reply.success {
+							if ps.CurrentTerm() < reply.term {
+								ps.SetTerm(reply.term)
+								n.state.role.Exchange(Follower)
+								return
+							} else {
+								n.state.stateMu.Lock()
+								if n.state.nextIndex[localId] == 0 {
+									panic("AAAAAaa")
+								}
+								n.state.nextIndex[localId]--
+								n.state.stateMu.Unlock()
+								continue // retry
+							}
+						} else {
+							n.state.stateMu.Lock()
+							n.state.matchIndex[localId] = n.state.nextIndex[localId]
+							n.state.nextIndex[localId]++
+							n.state.stateMu.Unlock()
+						}
+					}
+				})
 			}
 		}
 	})
@@ -468,6 +481,7 @@ func (n *Node) BootRun() {
 			n.ConnectRPC()
 		})
 
+		// Establishing connections
 		for id := range n.ids {
 			n.reconnC <- id
 		}

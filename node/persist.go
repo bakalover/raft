@@ -62,11 +62,12 @@ func (p *PersistentState) CurrentTerm() uint64 {
 	return el.CurrentTerm
 }
 
-func (p *PersistentState) IncremenTerm() {
+func (p *PersistentState) IncrementAndFetchTerm() uint64 {
 	var el TermState
 	p.db.Model(&TermState{}).First(&el)
 	el.CurrentTerm++
 	p.db.Model(&TermState{}).Save(&el)
+	return el.CurrentTerm
 }
 
 func (p *PersistentState) VotedFor() string {
