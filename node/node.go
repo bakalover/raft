@@ -407,6 +407,7 @@ func (n *Node) AuthorityHeartbeats() {
 
 		case <-stopBeatsC:
 			n.state.role.TransitTo(Follower)
+			ti.Stop()
 			go n.DefferedElection()
 			return
 		}
@@ -450,8 +451,9 @@ func (n *Node) Commiter(currentTerm uint64) {
 
 	quorum := (n.ids - 1) / 2
 	ps := n.state.persistentState
-
+	ti := time.NewTicker(30 * time.Millisecond)
 	for {
+		<-ti.C
 		lastIndex := ps.LastEntry().Index
 		n.state.stateMu.Lock()
 		N := n.state.commitIndex + 1
@@ -469,7 +471,22 @@ func (n *Node) Commiter(currentTerm uint64) {
 		n.state.stateMu.Unlock()
 
 		if n.state.role.Whoami() == Follower {
+			ti.Stop()
 			return
+		}
+	}
+}
+
+func (n *Node) Apply() {
+	ti := time.NewTicker(30 * time.Millisecond)
+	for {
+		<-ti.C
+		n.state.stateMu.Lock()
+		ci := n.state.commitIndex
+		n.state.stateMu.Unlock()
+
+		if ci > n.state.lastApplied {
+			// Apply to machine
 		}
 	}
 }
@@ -513,6 +530,8 @@ func (n *Node) BootRun() {
 	}
 
 	go n.DefferedElection()
+
+	go n.Apply()
 
 	// TODO n.LogCompaction()
 }
