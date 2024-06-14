@@ -17,9 +17,9 @@ const (
 type State struct {
 	role            *RoleStateMachine
 	persistentState *PersistentState
+	stateMu         sync.Mutex
 	commitIndex     uint64
 	lastApplied     uint64
-	stateMu         sync.Mutex
 	nextIndex       []uint64
 	matchIndex      []uint64
 }
@@ -151,10 +151,12 @@ func (n *Node) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesResult
 	// Batch append starts with current [prevLogIndex + 1] position
 	ps.AppendToLog(args.term, args.prevLogIndex+1, args.entries)
 
+	n.state.stateMu.Lock()
 	if args.leaderCommit > n.state.commitIndex {
 		//Mutex protection during compaction???
 		n.state.commitIndex = min(args.leaderCommit, args.prevLogIndex+uint64(len(args.entries)))
 	}
+	n.state.stateMu.Unlock()
 
 	reply.success = true
 	return nil
@@ -345,21 +347,28 @@ func (n *Node) ServeClients() {
 
 	go n.AuthorityHeartbeats()
 
+	ps := n.state.persistentState
+	currentTerm := ps.CurrentTerm()
+
+	go n.Commiter(currentTerm)
+
 	for upd := range n.clientC {
-		ps := n.state.persistentState
 		entries := []string{upd} // TODO: batches
-		term := ps.CurrentTerm()
 		last := ps.LastEntry()
 
-		ps.AppendToLog(term, last.Index+1, entries)
+		ps.AppendToLog(currentTerm, last.Index+1, entries)
+
+		n.state.stateMu.Lock()
+		ci := n.state.commitIndex
+		n.state.stateMu.Unlock()
 
 		args := &AppendEntriesArgs{
-			term:         term,
+			term:         currentTerm,
 			leaderId:     string(n.id),
 			prevLogIndex: last.Index,
 			prevLogTerm:  last.Term,
 			entries:      entries,
-			leaderCommit: n.state.commitIndex,
+			leaderCommit: ci,
 		}
 
 		for id := range n.ids {
@@ -433,6 +442,34 @@ func (n *Node) Replicate(id int, args *AppendEntriesArgs) {
 			n.state.matchIndex[id] = n.state.nextIndex[id]
 			n.state.nextIndex[id]++
 			n.state.stateMu.Unlock()
+		}
+	}
+}
+
+func (n *Node) Commiter(currentTerm uint64) {
+
+	quorum := (n.ids - 1) / 2
+	ps := n.state.persistentState
+
+	for {
+		lastIndex := ps.LastEntry().Index
+		n.state.stateMu.Lock()
+		N := n.state.commitIndex + 1
+		for index := N; index <= lastIndex; index++ {
+			count := 0
+			for id := range n.ids {
+				if n.state.matchIndex[id] >= N {
+					count++
+				}
+			}
+			if count >= quorum && currentTerm == ps.NthEntry(index).Term {
+				n.state.commitIndex = N
+			}
+		}
+		n.state.stateMu.Unlock()
+
+		if n.state.role.Whoami() == Follower {
+			return
 		}
 	}
 }
