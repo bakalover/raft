@@ -7,12 +7,11 @@ import (
 	"net/rpc"
 	"sync"
 	"time"
-
-	"github.com/bakalover/tate"
 )
 
 const (
-	NullCanidateId = "nodeNull"
+	NULL_CANDIDATE_ID = "nodeNull"
+	AUTHORITY_TIMEOUT = 200 * time.Millisecond
 )
 
 type State struct {
@@ -26,9 +25,8 @@ type State struct {
 }
 
 type Node struct {
-	id    int
-	ids   int
-	scope *tate.Scope
+	id  int
+	ids int
 	// Protects reconnClients
 	reconnMu sync.Mutex
 	// Transfers info about which nodes is down (ids) and need to be reconnected
@@ -136,7 +134,7 @@ func (n *Node) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesResult
 
 	if args.term > currentTerm {
 		ps.SetTerm(args.term)
-		n.state.role.Exchange(Follower)
+		n.state.role.TransitTo(Follower)
 	}
 
 	// Seek same log position. If we have 0 - ok, just append
@@ -151,7 +149,7 @@ func (n *Node) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesResult
 	ps.ClearAbove(args.prevLogIndex)
 
 	// Batch append starts with current [prevLogIndex + 1] position
-	ps.Append(args.term, args.prevLogIndex+1, args.entries)
+	ps.AppendToLog(args.term, args.prevLogIndex+1, args.entries)
 
 	if args.leaderCommit > n.state.commitIndex {
 		//Mutex protection during compaction???
@@ -190,7 +188,7 @@ func (n *Node) RequestVote(args *RequestVoteArgs, reply *RequestVoteResult) erro
 		votedFor := ps.VotedFor()
 		lastEntry := ps.LastEntry()
 
-		if (votedFor != NullCanidateId) && (votedFor != args.candidateId) {
+		if (votedFor != NULL_CANDIDATE_ID) && (votedFor != args.candidateId) {
 			reply.voteGranted = false
 			return nil
 		}
@@ -203,7 +201,7 @@ func (n *Node) RequestVote(args *RequestVoteArgs, reply *RequestVoteResult) erro
 		if args.lastLogTerm > lastEntry.Term {
 			reply.voteGranted = true
 			ps.Set(args.term, args.candidateId)
-			n.state.role.Exchange(Follower)
+			n.state.role.TransitTo(Follower)
 			return nil
 		}
 
@@ -211,7 +209,7 @@ func (n *Node) RequestVote(args *RequestVoteArgs, reply *RequestVoteResult) erro
 			if args.lastLogIndex >= lastEntry.Index {
 				reply.voteGranted = true
 				ps.SetVotedFor(args.candidateId)
-				n.state.role.Exchange(Follower)
+				n.state.role.TransitTo(Follower)
 				return nil
 			} else {
 				reply.voteGranted = false
@@ -240,15 +238,19 @@ func (n *Node) ConnectRPC() {
 	}
 }
 
+func (n *Node) DefferedElection() {
+	n.ResetElectionTimer()
+	// Other goroutines may also reset timer several or infinite times
+	<-n.electionTimer.C
+	n.ImmediateElection()
+}
+
 type Vote struct{} // Sugar
 
 func (n *Node) ImmediateElection() {
 	quorum := (n.ids - 1) / 2 //n.ids % 2 == 1
 	ps := n.state.persistentState
-
-	// Transit state
-	term := ps.IncrementAndFetchTerm()
-	n.state.role.Exchange(Candidate)
+	term := n.TransitToCandidate()
 
 	// Buffer prevents deadlock that leads to memory leak:
 	// In case when quorum is gathered and there more granted votes
@@ -257,10 +259,8 @@ func (n *Node) ImmediateElection() {
 
 	// Prepare RPC args
 	last := ps.LastEntry()
-
 	lastLogIndex := last.Index
 	lastLogTerm := last.Term
-
 	args := &RequestVoteArgs{
 		term:         term,
 		candidateId:  string(n.id),
@@ -272,71 +272,70 @@ func (n *Node) ImmediateElection() {
 	// If timeout occures -> transit into next term and then retry election
 	n.ResetElectionTimer()
 
-	tate.FixScope(func(s *tate.Scope) {
-		for id := range n.ids {
-			localId := id
-			s.Go(func() {
-				reply := new(RequestVoteResult)
-				// Semi-bottleneck =( ; .Go(...) partly neutralizes mutex effect inside Get(Client)
-				call := n.GetClient(localId).Go("Node.RequestVote", args, reply, nil)
+	for id := range n.ids {
+		go n.MakeVoteCall(id, args, countVote)
+	}
 
-				<-call.Done
-				if call.Error != nil {
-					n.reconnC <- id // Request reconnection to node
-					return          // This RequestVote call failed, no retries
-				}
-				if reply.voteGranted {
-					countVote <- Vote{} // (!) May blocks forever without buffer!!
-				} else {
-					//	Diffent rpc calls may rewrite persistent term
-					//	So we are facing some race here
-					//	To prevent such thing we use thread-safe persistent storage
-					// 	Performance negative impact =(
-					if ps.CurrentTerm() < reply.term {
-						ps.SetTerm(reply.term)
-						n.state.role.Exchange(Follower) // Discover new Term
-					}
-				}
-			})
+	n.GatherQuorumOrRetry(countVote, quorum)
+}
+
+func (n *Node) MakeVoteCall(id int, args *RequestVoteArgs, c chan<- Vote) {
+	reply := new(RequestVoteResult)
+	ps := n.state.persistentState
+	err := n.GetClient(id).Call("Node.RequestVote", args, reply)
+	if err != nil {
+		n.reconnC <- id // Request reconnection to node
+		return          // This RequestVote call failed, no retries
+	}
+	if reply.voteGranted {
+		c <- Vote{} // (!) May blocks forever without buffer!!
+	} else {
+		//	Diffent rpc calls may rewrite persistent term
+		//	So we are facing some race here
+		//	To prevent such thing we use thread-safe persistent storage
+		// 	Performance negative impact =(
+		if ps.CurrentTerm() < reply.term {
+			ps.SetTerm(reply.term)
+			n.state.role.TransitTo(Follower) // Discover new Term
 		}
-	})
+	}
+}
 
+func (n *Node) TransitToCandidate() uint64 {
+	term := n.state.persistentState.IncrementAndFetchTerm()
+	n.state.role.TransitTo(Candidate)
+	return term
+}
+
+func (n *Node) GatherQuorumOrRetry(c <-chan Vote, atLeast int) {
 	gotVotes := 0
 	for {
 		select {
-		case <-countVote:
+		case <-c:
 			gotVotes++
-			if gotVotes >= quorum {
-				n.state.role.Exchange(Leader)
-				n.scope.Go(func() { n.Replicate() }) // Start replication
+			if gotVotes >= atLeast {
+				n.state.role.TransitTo(Leader)
+				go n.ServeClients() // Start replication
 				return
 			}
 		case <-n.electionTimer.C:
 			// Just starting another Immediate election if that fails
 			// In case there is Follower state (stored during parallel AppendEntries call -> start Deffered Election)
-			if n.state.role.Load() == Follower {
-				n.scope.Go(func() { n.DefferedElection() })
+			if n.state.role.Whoami() == Follower {
+				go n.DefferedElection()
 			} else {
-				n.scope.Go(func() { n.ImmediateElection() }) // Seems like AsYnc ReCuRSioN =)) ;
+				go n.ImmediateElection() // Seems like AsYnc ReCuRSioN =)) ;
 			}
 			return
 		}
 	}
-
 }
 
-func (n *Node) DefferedElection() {
-	n.ResetElectionTimer()
-	// Other goroutines may also reset timer several or infinite times
-	<-n.electionTimer.C
-	n.ImmediateElection()
-}
-
-func (n *Node) Replicate() {
+func (n *Node) ServeClients() {
 
 	lastIndex := n.state.persistentState.LastEntry().Index
 
-	// Reinitialized after election
+	// (Reinitialized after election)
 	n.state.stateMu.Lock()
 	for i := range len(n.state.nextIndex) {
 		n.state.nextIndex[i] = lastIndex + 1
@@ -344,104 +343,98 @@ func (n *Node) Replicate() {
 	}
 	n.state.stateMu.Unlock()
 
-	// Authority Heartbeats
-	n.scope.Go(func() {
-		ti := time.NewTicker(200 * time.Millisecond)
-		emptyArgs := new(AppendEntriesArgs)
-		stopBeatsC := make(chan struct{}, n.ids)
+	go n.AuthorityHeartbeats()
 
-		for {
-			select {
-			case <-ti.C:
+	for upd := range n.clientC {
+		ps := n.state.persistentState
+		entries := []string{upd} // TODO: batches
+		term := ps.CurrentTerm()
+		last := ps.LastEntry()
 
-				tate.FixScope(func(s *tate.Scope) {
-					for id := range n.ids {
-						localId := id
-						s.Go(
-							func() {
-								reply := new(AppendEntriesResult)
-								call := n.GetClient(localId).Go("Node.AppendEntries", emptyArgs, reply, nil)
-								<-call.Done
-								if call.Error != nil {
-									n.reconnC <- id // Request reconnection to node
-									return          // This RequestVote call failed, no retries
-								}
+		ps.AppendToLog(term, last.Index+1, entries)
 
-								if !reply.success {
-									ps := n.state.persistentState
-									if ps.CurrentTerm() < reply.term {
-										ps.SetTerm(reply.term)
-										stopBeatsC <- struct{}{}
-									}
-								}
-							},
-						)
-					}
-				})
-
-			case <-stopBeatsC:
-				n.state.role.Exchange(Follower)
-				n.scope.Go(func() { n.DefferedElection() })
-				return
-			}
+		args := &AppendEntriesArgs{
+			term:         term,
+			leaderId:     string(n.id),
+			prevLogIndex: last.Index,
+			prevLogTerm:  last.Term,
+			entries:      entries,
+			leaderCommit: n.state.commitIndex,
 		}
-	})
 
-	tate.FixScope(func(s *tate.Scope) {
+		for id := range n.ids {
+			go n.Replicate(id, args)
+		}
+		if n.state.role.Whoami() == Follower {
+			return
+		}
+	}
+}
 
-		for upd := range n.clientC {
-			ps := n.state.persistentState
-			entries := []string{upd} // TODO: batches
-			term := ps.CurrentTerm()
-			last := ps.LastEntry()
-
-			ps.Append(term, last.Index+1, entries)
-
-			args := &AppendEntriesArgs{
-				term:         term,
-				leaderId:     string(n.id),
-				prevLogIndex: last.Index,
-				prevLogTerm:  last.Term,
-				entries:      entries,
-				leaderCommit: n.state.commitIndex,
-			}
-
+func (n *Node) AuthorityHeartbeats() {
+	ti := time.NewTicker(AUTHORITY_TIMEOUT)
+	emptyArgs := new(AppendEntriesArgs)
+	stopBeatsC := make(chan struct{}, n.ids)
+	for {
+		select {
+		case <-ti.C:
 			for id := range n.ids {
-				client := n.GetClient(id)
-				localId := id
-				s.Go(func() {
+				go func(id int) {
 					reply := new(AppendEntriesResult)
-					for {
-						err := client.Call("Node.AppendEntries", args, reply)
-						if err != nil {
-							n.reconnC <- localId
-							return
-						}
-						if !reply.success {
-							if ps.CurrentTerm() < reply.term {
-								ps.SetTerm(reply.term)
-								n.state.role.Exchange(Follower)
-								return
-							} else {
-								n.state.stateMu.Lock()
-								if n.state.nextIndex[localId] == 0 {
-									panic("AAAAAaa")
-								}
-								n.state.nextIndex[localId]--
-								n.state.stateMu.Unlock()
-								continue // retry
-							}
-						} else {
-							n.state.stateMu.Lock()
-							n.state.matchIndex[localId] = n.state.nextIndex[localId]
-							n.state.nextIndex[localId]++
-							n.state.stateMu.Unlock()
+					err := n.GetClient(id).Call("Node.AppendEntries", emptyArgs, reply)
+					if err != nil {
+						n.reconnC <- id // Request reconnection to node
+						return          // This RequestVote call failed, no retries
+					}
+					if !reply.success {
+						ps := n.state.persistentState
+						if ps.CurrentTerm() < reply.term {
+							ps.SetTerm(reply.term)
+							stopBeatsC <- struct{}{}
 						}
 					}
-				})
+				}(id)
 			}
+
+		case <-stopBeatsC:
+			n.state.role.TransitTo(Follower)
+			go n.DefferedElection()
+			return
 		}
-	})
+	}
+}
+
+func (n *Node) Replicate(id int, args *AppendEntriesArgs) {
+	reply := new(AppendEntriesResult)
+	ps := n.state.persistentState
+
+	for {
+		err := n.GetClient(id).Call("Node.AppendEntries", args, reply)
+		if err != nil {
+			n.reconnC <- id
+			return
+		}
+		if !reply.success {
+			if ps.CurrentTerm() < reply.term { // Observed higher term
+				ps.SetTerm(reply.term)
+				n.state.role.TransitTo(Follower)
+				return
+			} else { // Seek over incosistent log
+				n.state.stateMu.Lock()
+				if n.state.nextIndex[id] == 0 {
+					panic("bruuuuuuuh: nextIndex is 0")
+				}
+				n.state.nextIndex[id]--
+				n.state.stateMu.Unlock()
+				continue // retry
+			}
+		} else {
+			n.state.stateMu.Lock()
+			n.state.matchIndex[id] = n.state.nextIndex[id]
+			n.state.nextIndex[id]++
+			n.state.stateMu.Unlock()
+		}
+	}
 }
 
 func (n *Node) BootRun() {
@@ -453,7 +446,7 @@ func (n *Node) BootRun() {
 		// ?????????????????????????????????????????????????????????
 		// command := r.FormValue("command")
 		// for {
-		// 	role := n.state.role.Load()
+		// 	role := n.state.role.Whoami()
 		// 	switch role {
 		// 	case Follower:
 		// 		leader := n.state.persistentState.VotedFor()
@@ -468,31 +461,21 @@ func (n *Node) BootRun() {
 		// }
 	})
 
-	tate.FixScope(func(s *tate.Scope) {
-		s.Go(func() {
-			http.ListenAndServe("node"+string(n.id)+":8080", nil)
-		})
+	go http.ListenAndServe("node"+string(n.id)+":8080", nil)
 
-		//	First of all we need to establish rpc connections
-		// 	with all nodes (incuding caller)
-		// 	We will use that subroutine to reconnect rpc via channel signal
-		//	if we encounter node death
-		s.Go(func() {
-			n.ConnectRPC()
-		})
+	//	First of all we need to establish rpc connections
+	// 	with all nodes (incuding caller)
+	// 	We will use that subroutine to reconnect rpc via channel signal
+	//	if we encounter node death
 
-		// Establishing connections
-		for id := range n.ids {
-			n.reconnC <- id
-		}
+	go n.ConnectRPC()
 
-		s.Go(func() {
-			n.DefferedElection()
-		})
+	// Establishing connections
+	for id := range n.ids {
+		n.reconnC <- id
+	}
 
-		s.Go(func() {
-			// TODO n.LogCompaction()
-		})
+	go n.DefferedElection()
 
-	})
+	// TODO n.LogCompaction()
 }

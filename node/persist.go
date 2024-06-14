@@ -49,7 +49,7 @@ func (p *PersistentState) Init() {
 	if !p.db.Migrator().HasTable(&TermState{}) {
 		p.db.AutoMigrate(&TermState{})
 	}
-	p.Set(0, NullCanidateId)
+	p.Set(0, NULL_CANDIDATE_ID)
 }
 
 func (p *PersistentState) ShutDown() {
@@ -131,7 +131,7 @@ func (p *PersistentState) ClearAbove(index uint64) {
 		Delete(&LogEntry{})
 }
 
-func (p *PersistentState) Append(term uint64, lIndex uint64, entries []string) {
+func (p *PersistentState) AppendToLog(term uint64, lIndex uint64, entries []string) {
 	// Raft insures safety even if node dies while appending
 	for _, entry := range entries {
 		p.db.
