@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/rpc"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -242,7 +243,7 @@ func (n *Node) ConnectRPC() {
 			go func(id int) {
 				defer connectionTrack.Store(id, true) // Allow to new Recconnection error to proceed
 				defer n.UpdateClient(id, client)
-				for client, err = rpc.Dial("tcp", "node"+string(id)+":8080"); err != nil; {
+				for client, err = rpc.Dial("tcp", "node"+strconv.Itoa(id)+":8080"); err != nil; {
 					log.Printf("error connecting to server node%v via RPC", id)
 					time.Sleep(5 * time.Millisecond)
 				}
@@ -276,7 +277,7 @@ func (n *Node) ImmediateElection() {
 	lastLogTerm := last.Term
 	args := &RequestVoteArgs{
 		term:         term,
-		candidateId:  string(n.id),
+		candidateId:  strconv.Itoa(n.id),
 		lastLogIndex: lastLogIndex,
 		lastLogTerm:  lastLogTerm,
 	}
@@ -377,7 +378,7 @@ func (n *Node) ServeClients() {
 
 		args := &AppendEntriesArgs{
 			term:         currentTerm,
-			leaderId:     string(n.id),
+			leaderId:     strconv.Itoa(n.id),
 			prevLogIndex: last.Index,
 			prevLogTerm:  last.Term,
 			entries:      entries,
