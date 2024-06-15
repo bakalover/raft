@@ -12,8 +12,11 @@ import (
 )
 
 const (
-	NULL_CANDIDATE_ID = "nodeNull"
-	AUTHORITY_TIMEOUT = 200 * time.Millisecond
+	NullCandidateId                   = "nodeNull"
+	AuthorityTimeout                  = 200 * time.Millisecond
+	ElectionTimeoutSeconds            = 2
+	ElectionTimeoutSecondsLowerBorder = 2
+	ElectionTimeoutMilliseconds       = 2000
 )
 
 type State struct {
@@ -87,8 +90,8 @@ func (n *Node) GetClient(id int) *rpc.Client {
 }
 
 func ElectionTimeout() time.Duration {
-	seconds := rand.Intn(2) + 2
-	milliseconds := rand.Intn(2000)
+	seconds := rand.Intn(ElectionTimeoutSeconds) + ElectionTimeoutSecondsLowerBorder
+	milliseconds := rand.Intn(ElectionTimeoutMilliseconds)
 	return time.Duration(seconds)*time.Second + time.Duration(milliseconds)*time.Millisecond
 }
 
@@ -206,7 +209,7 @@ func (n *Node) RequestVote(args *RequestVoteArgs, reply *RequestVoteResult) erro
 		lastEntry := ps.LastEntry()
 		n.logger.Printf("Voted for: %v\n", votedFor)
 
-		if (votedFor != NULL_CANDIDATE_ID) && (votedFor != args.candidateId) {
+		if (votedFor != NullCandidateId) && (votedFor != args.candidateId) {
 			n.logger.Printf("Reject vote. Already voted: votedFor: %v, candidate: %v\n", votedFor, args.candidateId)
 			reply.voteGranted = false
 			return nil
@@ -347,7 +350,7 @@ func (n *Node) MakeVoteCall(id int, args *RequestVoteArgs, c chan<- Vote) {
 func (n *Node) TransitToCandidate() uint64 {
 	ps := n.state.persistentState
 	term := ps.IncrementAndFetchTerm()
-	ps.SetVotedFor(NULL_CANDIDATE_ID) // Prepare slot for votedFor
+	ps.SetVotedFor(NullCandidateId) // Prepare slot for votedFor
 	n.state.role.TransitTo(Candidate)
 	n.logger.Printf("Transit to Candidate state. New term - %v\n", term)
 	return term
@@ -433,7 +436,7 @@ func (n *Node) ServeClients() {
 }
 
 func (n *Node) AuthorityHeartbeats() {
-	ti := time.NewTicker(AUTHORITY_TIMEOUT)
+	ti := time.NewTicker(AuthorityTimeout)
 	emptyArgs := new(AppendEntriesArgs)
 	stopBeatsC := make(chan struct{}, n.ids)
 	for {
@@ -583,7 +586,7 @@ func (n *Node) BootRun() {
 	})
 
 	//	First of all we need to establish rpc connections
-	// 	with all nodes (incuding caller)
+	// 	with all nodes (excluding caller)
 	// 	We will use that subroutine to reconnect rpc via channel signal
 	//	if we encounter node death
 
@@ -597,6 +600,8 @@ func (n *Node) BootRun() {
 
 func (n *Node) InitConnections() {
 	for id := range n.ids {
-		n.reconnC <- id
+		if id != n.id {
+			n.reconnC <- id
+		}
 	}
 }

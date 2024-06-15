@@ -59,7 +59,7 @@ func (p *PersistentState) Init() {
 			Table(p.nodePrefix + TermStateTableSuffix).
 			AutoMigrate(&TermState{})
 	}
-	p.Set(0, NULL_CANDIDATE_ID)
+	p.Set(0, NullCandidateId)
 
 }
 
