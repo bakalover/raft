@@ -9,6 +9,11 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	LogTableSuffix       = "_log_table"
+	TermStateTableSuffix = "_term_state"
+)
+
 type LogEntry struct {
 	Index   uint64 `gorm:"primaryKey"`
 	Term    uint64
@@ -21,10 +26,11 @@ type TermState struct {
 }
 
 type PersistentState struct {
-	db *gorm.DB
+	nodePrefix string
+	db         *gorm.DB
 }
 
-func NewPersistentState() *PersistentState {
+func NewPersistentState(id string) *PersistentState {
 	dsn := fmt.Sprintf(
 		"host=%v user=%v password=%v dbname=%v port=%v sslmode=disable",
 		os.Getenv("PG_HOST"),
@@ -37,19 +43,24 @@ func NewPersistentState() *PersistentState {
 	if err != nil {
 		log.Fatalf("cannot establish connection to database: %v", err)
 	}
-	state := &PersistentState{conn}
+	state := &PersistentState{db: conn, nodePrefix: id}
 	state.Init()
 	return state
 }
 
 func (p *PersistentState) Init() {
 	if !p.db.Migrator().HasTable(&LogEntry{}) {
-		p.db.AutoMigrate(&LogEntry{})
+		p.db.
+			Table(p.nodePrefix + LogTableSuffix).
+			AutoMigrate(&LogEntry{})
 	}
 	if !p.db.Migrator().HasTable(&TermState{}) {
-		p.db.AutoMigrate(&TermState{})
+		p.db.
+			Table(p.nodePrefix + TermStateTableSuffix).
+			AutoMigrate(&TermState{})
 	}
 	p.Set(0, NULL_CANDIDATE_ID)
+
 }
 
 func (p *PersistentState) ShutDown() {
@@ -58,51 +69,71 @@ func (p *PersistentState) ShutDown() {
 
 func (p *PersistentState) CurrentTerm() uint64 {
 	var el TermState
-	p.db.Model(&TermState{}).First(&el)
+	p.db.
+		Table(p.nodePrefix + TermStateTableSuffix).
+		First(&el)
 	return el.CurrentTerm
 }
 
 func (p *PersistentState) IncrementAndFetchTerm() uint64 {
 	var el TermState
 	txn := p.db.Begin()
-	txn.First(&el)
+	txn.
+		Table(p.nodePrefix + TermStateTableSuffix).
+		First(&el)
 	el.CurrentTerm++
-	txn.Save(&el)
+	txn.
+		Table(p.nodePrefix + TermStateTableSuffix).
+		Save(&el)
 	txn.Commit()
 	return el.CurrentTerm
 }
 
 func (p *PersistentState) VotedFor() string {
 	var el TermState
-	p.db.Model(&TermState{}).First(&el)
+	p.db.
+		Table(p.nodePrefix + TermStateTableSuffix).
+		First(&el)
 	return el.VotedFor
 }
 
 func (p *PersistentState) SetTerm(term uint64) {
 	var t TermState
 	txn := p.db.Begin()
-	txn.Model(&TermState{}).First(&t)
+	txn.
+		Table(p.nodePrefix + TermStateTableSuffix).
+		First(&t)
 	t.CurrentTerm = term
-	txn.Model(&TermState{}).Save(&t)
+	txn.
+		Table(p.nodePrefix + TermStateTableSuffix).
+		Save(&t)
 	txn.Commit()
 }
 
 func (p *PersistentState) SetVotedFor(votedFor string) {
 	var t TermState
 	txn := p.db.Begin()
-	txn.Model(&TermState{}).First(&t)
+	txn.
+		Table(p.nodePrefix + TermStateTableSuffix).
+		First(&t)
 	t.VotedFor = votedFor
-	txn.Model(&TermState{}).Save(&t)
+	txn.
+		Table(p.nodePrefix + TermStateTableSuffix).
+		Save(&t)
 	txn.Commit()
 }
 
 func (p *PersistentState) Set(term uint64, votedFor string) {
 	var t TermState
 	txn := p.db.Begin()
-	txn.Model(&TermState{}).First(&t)
+	txn.
+		Table(p.nodePrefix + TermStateTableSuffix).
+		First(&t)
 	t.VotedFor = votedFor
 	t.CurrentTerm = term
-	txn.Model(&TermState{}).Save(&t)
+	txn.
+		Table(p.nodePrefix + TermStateTableSuffix).
+		Save(&t)
 	txn.Commit()
 }
 
@@ -110,7 +141,7 @@ func (p *PersistentState) NthEntry(n uint64) *LogEntry {
 	var l LogEntry
 
 	r := p.db.
-		Model(&LogEntry{}).
+		Table(p.nodePrefix+LogTableSuffix).
 		Where("index = ?", n).
 		First(&l)
 
@@ -126,7 +157,7 @@ func (p *PersistentState) LastEntry() *LogEntry {
 
 	// If there is no log entry -> "zero value" is already here
 	p.db.
-		Model(&LogEntry{}).
+		Table(p.nodePrefix + LogTableSuffix).
 		Last(&le)
 
 	return le
@@ -134,7 +165,7 @@ func (p *PersistentState) LastEntry() *LogEntry {
 
 func (p *PersistentState) ClearAbove(index uint64) {
 	p.db.
-		Model(&LogEntry{}).
+		Table(p.nodePrefix+LogTableSuffix).
 		Where("index > ?", index).
 		Delete(&LogEntry{})
 }
@@ -143,7 +174,7 @@ func (p *PersistentState) AppendToLog(term uint64, lIndex uint64, entries []stri
 	// Raft insures safety even if node dies while appending
 	for _, entry := range entries {
 		p.db.
-			Model(&LogEntry{}).
+			Table(p.nodePrefix + LogTableSuffix).
 			Create(&LogEntry{Index: lIndex, Term: term, Command: entry})
 		lIndex++
 	}

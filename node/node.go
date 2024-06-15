@@ -56,7 +56,7 @@ func NewNode(id int, ids int) *Node {
 
 	state := &State{
 		role:            new(RoleStateMachine),
-		persistentState: NewPersistentState(),
+		persistentState: NewPersistentState(strconv.Itoa(id)),
 		commitIndex:     0,
 		lastApplied:     0,
 		nextIndex:       nextIndex,
@@ -552,7 +552,7 @@ func (n *Node) Apply() {
 		n.state.stateMu.Unlock()
 
 		if ci > n.state.lastApplied {
-			n.logger.Println("Found command under commitIndex! Applying...")
+			n.logger.Println("Found command covered by commitIndex! Applying...")
 			// Apply to machine and respond to client
 		}
 	}
