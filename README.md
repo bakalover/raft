@@ -1,5 +1,5 @@
 # Raft
-🥱 Yet another boring raft implementation, just for fun.
+🥱 Just for fun
 ___
 ### Features
 - Frontend - HTTP
