@@ -64,9 +64,11 @@ func (p *PersistentState) CurrentTerm() uint64 {
 
 func (p *PersistentState) IncrementAndFetchTerm() uint64 {
 	var el TermState
-	p.db.Model(&TermState{}).First(&el)
+	txn := p.db.Begin()
+	txn.First(&el)
 	el.CurrentTerm++
-	p.db.Model(&TermState{}).Save(&el)
+	txn.Save(&el)
+	txn.Commit()
 	return el.CurrentTerm
 }
 
@@ -78,24 +80,30 @@ func (p *PersistentState) VotedFor() string {
 
 func (p *PersistentState) SetTerm(term uint64) {
 	var t TermState
-	p.db.Model(&TermState{}).First(&t)
+	txn := p.db.Begin()
+	txn.Model(&TermState{}).First(&t)
 	t.CurrentTerm = term
-	p.db.Model(&TermState{}).Save(&t)
+	txn.Model(&TermState{}).Save(&t)
+	txn.Commit()
 }
 
 func (p *PersistentState) SetVotedFor(votedFor string) {
 	var t TermState
-	p.db.Model(&TermState{}).First(&t)
+	txn := p.db.Begin()
+	txn.Model(&TermState{}).First(&t)
 	t.VotedFor = votedFor
-	p.db.Model(&TermState{}).Save(&t)
+	txn.Model(&TermState{}).Save(&t)
+	txn.Commit()
 }
 
 func (p *PersistentState) Set(term uint64, votedFor string) {
 	var t TermState
-	p.db.Model(&TermState{}).First(&t)
+	txn := p.db.Begin()
+	txn.Model(&TermState{}).First(&t)
 	t.VotedFor = votedFor
 	t.CurrentTerm = term
-	p.db.Model(&TermState{}).Save(&t)
+	txn.Model(&TermState{}).Save(&t)
+	txn.Commit()
 }
 
 func (p *PersistentState) NthEntry(n uint64) *LogEntry {

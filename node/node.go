@@ -448,7 +448,6 @@ func (n *Node) Replicate(id int, args *AppendEntriesArgs) {
 }
 
 func (n *Node) Commiter(currentTerm uint64) {
-
 	quorum := (n.ids - 1) / 2
 	ps := n.state.persistentState
 	ti := time.NewTicker(30 * time.Millisecond)
@@ -515,8 +514,6 @@ func (n *Node) BootRun() {
 		// }
 	})
 
-	go http.ListenAndServe("node"+string(n.id)+":8080", nil)
-
 	//	First of all we need to establish rpc connections
 	// 	with all nodes (incuding caller)
 	// 	We will use that subroutine to reconnect rpc via channel signal
@@ -524,14 +521,17 @@ func (n *Node) BootRun() {
 
 	go n.ConnectRPC()
 
-	// Establishing connections
-	for id := range n.ids {
-		n.reconnC <- id
-	}
-
 	go n.DefferedElection()
 
 	go n.Apply()
 
-	// TODO n.LogCompaction()
+	n.InitConnections()
+
+	http.ListenAndServe("node"+string(n.id)+":8080", nil)
+}
+
+func (n *Node) InitConnections() {
+	for id := range n.ids {
+		n.reconnC <- id
+	}
 }
