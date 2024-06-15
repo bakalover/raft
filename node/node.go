@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/rpc"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -37,6 +38,7 @@ type Node struct {
 	clientC       chan string
 	state         *State
 	electionTimer time.Timer
+	logger        *log.Logger
 }
 
 func NewNode(id int, ids int) *Node {
@@ -45,6 +47,7 @@ func NewNode(id int, ids int) *Node {
 	matchIndex := make([]uint64, countWithoutMe)
 	reconnClients := make([]*rpc.Client, countWithoutMe)
 	reconnC := make(chan int)
+	logger := log.New(os.Stdout, "[INFO]", log.Lshortfile|log.Ltime|log.Lmicroseconds)
 
 	for i := range countWithoutMe {
 		nextIndex[i] = 1
@@ -66,6 +69,7 @@ func NewNode(id int, ids int) *Node {
 		reconnClients: reconnClients,
 		reconnC:       reconnC,
 		state:         state,
+		logger:        logger,
 	}
 }
 
@@ -73,6 +77,7 @@ func (n *Node) UpdateClient(id int, c *rpc.Client) {
 	n.reconnMu.Lock()
 	defer n.reconnMu.Unlock()
 	n.reconnClients[id] = c
+	n.logger.Printf("New rpc client for id - %v\n", id)
 }
 
 func (n *Node) GetClient(id int) *rpc.Client {
@@ -119,6 +124,7 @@ func (n *Node) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesResult
 
 	// Authority Heartbeat
 	if args.entries == nil {
+		n.logger.Println("Heartbeat!")
 		n.ResetElectionTimer()
 		if args.term < currentTerm {
 			reply.success = false
@@ -129,6 +135,7 @@ func (n *Node) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesResult
 	}
 
 	if args.term < currentTerm {
+		n.logger.Printf("Reject appending: my term - %v, request term - %v\n", currentTerm, args.term)
 		reply.success = false
 		return nil
 	}
@@ -136,11 +143,16 @@ func (n *Node) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesResult
 	if args.term > currentTerm {
 		ps.SetTerm(args.term)
 		n.state.role.TransitTo(Follower)
+		n.logger.Printf("Observerd higher term during appending - transit to follower\n")
 	}
 
 	// Seek same log position. If we have 0 - ok, just append
 	if args.prevLogIndex > 0 {
 		e := ps.NthEntry(args.prevLogIndex)
+		if e == nil {
+			n.logger.Panic("Nil Nth entry!")
+		}
+		n.logger.Printf("Seeking: current term and index: %v, %v. Needed term - %v\n", e.Term, e.Index, args.prevLogTerm)
 		if e == nil || e.Term != args.prevLogTerm {
 			reply.success = false
 			return nil
@@ -156,6 +168,7 @@ func (n *Node) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesResult
 	if args.leaderCommit > n.state.commitIndex {
 		//Mutex protection during compaction???
 		n.state.commitIndex = min(args.leaderCommit, args.prevLogIndex+uint64(len(args.entries)))
+		n.logger.Printf("New observed commit index during appending - %v\n", n.state.commitIndex)
 	}
 	n.state.stateMu.Unlock()
 
@@ -185,18 +198,22 @@ func (n *Node) RequestVote(args *RequestVoteArgs, reply *RequestVoteResult) erro
 	reply.term = currentTerm
 
 	if args.term < currentTerm {
+		n.logger.Printf("Reject vote args.term < currentTerm: %v < %v\n", args.term, currentTerm)
 		reply.voteGranted = false
 		return nil
 	} else {
 		votedFor := ps.VotedFor()
 		lastEntry := ps.LastEntry()
+		n.logger.Printf("Voted for: %v\n", votedFor)
 
 		if (votedFor != NULL_CANDIDATE_ID) && (votedFor != args.candidateId) {
+			n.logger.Printf("Reject vote. Already voted: votedFor: %v, candidate: %v\n", votedFor, args.candidateId)
 			reply.voteGranted = false
 			return nil
 		}
 
 		if args.lastLogTerm < lastEntry.Term {
+			n.logger.Printf("Reject vote. Local term higher: %v < %v\n", args.lastLogIndex, lastEntry.Term)
 			reply.voteGranted = false
 			return nil
 		}
@@ -205,6 +222,7 @@ func (n *Node) RequestVote(args *RequestVoteArgs, reply *RequestVoteResult) erro
 			reply.voteGranted = true
 			ps.Set(args.term, args.candidateId)
 			n.state.role.TransitTo(Follower)
+			n.logger.Printf("Vote granted. Candidate - %v with higher term - %v. Transit to Follower\n", args.candidateId, args.term)
 			return nil
 		}
 
@@ -213,8 +231,10 @@ func (n *Node) RequestVote(args *RequestVoteArgs, reply *RequestVoteResult) erro
 				reply.voteGranted = true
 				ps.SetVotedFor(args.candidateId)
 				n.state.role.TransitTo(Follower)
+				n.logger.Printf("Vote granted. Candidate - %v with higher index - %v. Transit to Follower\n", args.candidateId, args.lastLogIndex)
 				return nil
 			} else {
+				n.logger.Printf("Vote rejected. Candidate - %v with lower index - %v.\n", args.candidateId, args.lastLogIndex)
 				reply.voteGranted = false
 				return nil
 			}
@@ -239,12 +259,16 @@ func (n *Node) ConnectRPC() {
 	}
 
 	for id := range n.reconnC {
+		n.logger.Printf("Requested reconnection for node with id - %v\n", id)
 		if connectionTrack.CompareAndSwap(id, true, false) { // Defence from double Dialing
 			go func(id int) {
 				defer connectionTrack.Store(id, true) // Allow to new Recconnection error to proceed
-				defer n.UpdateClient(id, client)
+				defer func() {
+					n.UpdateClient(id, client)
+					n.logger.Printf("Connection establish to node%v via RPC\n", id)
+				}()
 				for client, err = rpc.Dial("tcp", "node"+strconv.Itoa(id)+":8080"); err != nil; {
-					log.Printf("error connecting to server node%v via RPC", id)
+					n.logger.Printf("Couldn't establish connection to node%v via RPC. Retrying...\n", id)
 					time.Sleep(5 * time.Millisecond)
 				}
 			}(id)
@@ -253,9 +277,11 @@ func (n *Node) ConnectRPC() {
 }
 
 func (n *Node) DefferedElection() {
+	n.logger.Println("Start Deffered election")
 	n.ResetElectionTimer()
 	// Other goroutines may also reset timer several or infinite times
 	<-n.electionTimer.C
+	n.logger.Println("Start Immediate election")
 	n.ImmediateElection()
 }
 
@@ -298,6 +324,7 @@ func (n *Node) MakeVoteCall(id int, args *RequestVoteArgs, c chan<- Vote) {
 	ps := n.state.persistentState
 	err := n.GetClient(id).Call("Node.RequestVote", args, reply)
 	if err != nil {
+		n.logger.Printf("Error in Node.RequestVote Call: %v on Client - %v. Requesting reconnection...\n", err, id)
 		n.reconnC <- id // Request reconnection to node
 		return          // This RequestVote call failed, no retries
 	}
@@ -308,7 +335,9 @@ func (n *Node) MakeVoteCall(id int, args *RequestVoteArgs, c chan<- Vote) {
 		//	So we are facing some race here
 		//	To prevent such thing we use thread-safe persistent storage
 		// 	Performance negative impact =(
-		if ps.CurrentTerm() < reply.term {
+		currentTerm := ps.CurrentTerm()
+		if currentTerm < reply.term {
+			n.logger.Printf("Observed higher term while MakeVoteCall: Current - %v, Observerd - %v\n", currentTerm, reply.term)
 			ps.SetTerm(reply.term)
 			n.state.role.TransitTo(Follower) // Discover new Term
 		}
@@ -320,6 +349,7 @@ func (n *Node) TransitToCandidate() uint64 {
 	term := ps.IncrementAndFetchTerm()
 	ps.SetVotedFor(NULL_CANDIDATE_ID) // Prepare slot for votedFor
 	n.state.role.TransitTo(Candidate)
+	n.logger.Printf("Transit to Candidate state. New term - %v\n", term)
 	return term
 }
 
@@ -331,15 +361,19 @@ func (n *Node) GatherQuorumOrRetry(c <-chan Vote, atLeast int) {
 			gotVotes++
 			if gotVotes >= atLeast {
 				n.state.role.TransitTo(Leader)
+				n.logger.Println("Election Successful. Transit to Leader state")
 				go n.ServeClients() // Start replication
 				return
 			}
 		case <-n.electionTimer.C:
 			// Just starting another Immediate election if that fails
 			// In case there is Follower state (stored during parallel AppendEntries call -> start Deffered Election)
+			n.logger.Println("Election timeout occur while gathering vote quorum")
 			if n.state.role.Whoami() == Follower {
+				n.logger.Println("Someone made me Follower while Appending during my election")
 				go n.DefferedElection()
 			} else {
+				n.logger.Println("Retrying Election...")
 				go n.ImmediateElection() // Seems like AsYnc ReCuRSioN =)) ;
 			}
 			return
@@ -348,7 +382,6 @@ func (n *Node) GatherQuorumOrRetry(c <-chan Vote, atLeast int) {
 }
 
 func (n *Node) ServeClients() {
-
 	lastIndex := n.state.persistentState.LastEntry().Index
 
 	// (Reinitialized after election)
@@ -367,9 +400,12 @@ func (n *Node) ServeClients() {
 	go n.Commiter(currentTerm)
 
 	for upd := range n.clientC {
+		n.logger.Printf("Recieved command from client: %v\n", upd)
+
 		entries := []string{upd} // TODO: batches
 		last := ps.LastEntry()
 
+		n.logger.Println("Appending command to local Leader log")
 		ps.AppendToLog(currentTerm, last.Index+1, entries)
 
 		n.state.stateMu.Lock()
@@ -385,10 +421,12 @@ func (n *Node) ServeClients() {
 			leaderCommit: ci,
 		}
 
+		n.logger.Println("Begin Replication...")
 		for id := range n.ids {
 			go n.Replicate(id, args)
 		}
 		if n.state.role.Whoami() == Follower {
+			n.logger.Println("Stop serving clients because transited Leader -> Follower")
 			return
 		}
 	}
@@ -401,26 +439,33 @@ func (n *Node) AuthorityHeartbeats() {
 	for {
 		select {
 		case <-ti.C:
+			n.logger.Println("Make Heartbeat")
 			for id := range n.ids {
 				go func(id int) {
 					reply := new(AppendEntriesResult)
 					err := n.GetClient(id).Call("Node.AppendEntries", emptyArgs, reply)
 					if err != nil {
+						n.logger.Printf("Error on heartbeat. Client - %v. Requesting reconnection...\n", id)
 						n.reconnC <- id // Request reconnection to node
 						return          // This RequestVote call failed, no retries
 					}
 					if !reply.success {
 						ps := n.state.persistentState
-						if ps.CurrentTerm() < reply.term {
+						currentTerm := ps.CurrentTerm()
+						if currentTerm < reply.term {
+							n.logger.Printf("Error on heartbeat. Observed higher term Client - %v. Local term - %v, Observed term - %v.Stop heartbeats\n", id, currentTerm, reply.term)
 							ps.SetTerm(reply.term)
 							stopBeatsC <- struct{}{}
+							return
 						}
+						n.logger.Panic("Unreachable")
 					}
 				}(id)
 			}
 
 		case <-stopBeatsC:
 			n.state.role.TransitTo(Follower)
+			n.logger.Println("Tnansit from Leader to Follower")
 			ti.Stop()
 			go n.DefferedElection()
 			return
@@ -434,19 +479,22 @@ func (n *Node) Replicate(id int, args *AppendEntriesArgs) {
 
 	for {
 		err := n.GetClient(id).Call("Node.AppendEntries", args, reply)
+		n.logger.Printf("Error on AppendEntries Call: %v. Requesting reconnection...\n", err)
 		if err != nil {
 			n.reconnC <- id
 			return
 		}
 		if !reply.success {
-			if ps.CurrentTerm() < reply.term { // Observed higher term
+			currentTerm := ps.CurrentTerm()
+			if currentTerm < reply.term { // Observed higher term
+				n.logger.Printf("Error on appending. Observed higher term. Client - %v. Local term - %v. Observed term - %v. Transit to Follower\n", id, currentTerm, reply.term)
 				ps.SetTerm(reply.term)
 				n.state.role.TransitTo(Follower)
 				return
 			} else { // Seek over incosistent log
 				n.state.stateMu.Lock()
 				if n.state.nextIndex[id] == 0 {
-					panic("bruuuuuuuh: nextIndex is 0")
+					n.logger.Panic("While seeking on other node's log: n.state.nextIndex[id] == 0")
 				}
 				n.state.nextIndex[id]--
 				n.state.stateMu.Unlock()
@@ -456,12 +504,14 @@ func (n *Node) Replicate(id int, args *AppendEntriesArgs) {
 			n.state.stateMu.Lock()
 			n.state.matchIndex[id] = n.state.nextIndex[id]
 			n.state.nextIndex[id]++
+			n.logger.Printf("Updated for node%v nextIndex - %v, matchIndex - %v\n", id, n.state.nextIndex[id], n.state.matchIndex[id])
 			n.state.stateMu.Unlock()
 		}
 	}
 }
 
 func (n *Node) Commiter(currentTerm uint64) {
+	n.logger.Println("Begin seeking commitIndex...")
 	quorum := (n.ids - 1) / 2
 	ps := n.state.persistentState
 	ti := time.NewTicker(30 * time.Millisecond)
@@ -478,12 +528,14 @@ func (n *Node) Commiter(currentTerm uint64) {
 				}
 			}
 			if count >= quorum && currentTerm == ps.NthEntry(index).Term {
+				n.logger.Printf("Found quorum on commitIndex! New commitIndex - %v\n", N)
 				n.state.commitIndex = N
 			}
 		}
 		n.state.stateMu.Unlock()
 
 		if n.state.role.Whoami() == Follower {
+			n.logger.Println("Stop seeking commitIndex because transited Leader -> Follower")
 			ti.Stop()
 			return
 		}
@@ -491,6 +543,7 @@ func (n *Node) Commiter(currentTerm uint64) {
 }
 
 func (n *Node) Apply() {
+	n.logger.Println("Begin seeking applying commands to state machine...")
 	ti := time.NewTicker(30 * time.Millisecond)
 	for {
 		<-ti.C
@@ -499,6 +552,7 @@ func (n *Node) Apply() {
 		n.state.stateMu.Unlock()
 
 		if ci > n.state.lastApplied {
+			n.logger.Println("Found command under commitIndex! Applying...")
 			// Apply to machine and respond to client
 		}
 	}
@@ -538,7 +592,7 @@ func (n *Node) BootRun() {
 	go n.DefferedElection()
 
 	n.InitConnections()
-	http.ListenAndServe("node"+string(n.id)+":8080", nil)
+	http.ListenAndServe("node"+strconv.Itoa(n.id)+":8080", nil)
 }
 
 func (n *Node) InitConnections() {
