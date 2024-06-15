@@ -51,6 +51,7 @@ func NewNode(id int, ids int) *Node {
 	reconnClients := make([]*rpc.Client, countWithoutMe)
 	reconnC := make(chan int)
 	logger := log.New(os.Stdout, "[INFO]", log.Lshortfile|log.Ltime|log.Lmicroseconds)
+	electionTimer := time.NewTimer(ElectionTimeout())
 
 	for i := range countWithoutMe {
 		nextIndex[i] = 1
@@ -73,6 +74,7 @@ func NewNode(id int, ids int) *Node {
 		reconnC:       reconnC,
 		state:         state,
 		logger:        logger,
+		electionTimer: *electionTimer,
 	}
 }
 
@@ -258,11 +260,13 @@ func (n *Node) ConnectRPC() {
 	)
 
 	for id := range n.ids {
-		connectionTrack.Store(id, true) // Assuming that all connections are ok
+		if id != n.id {
+			connectionTrack.Store(id, true) // Assuming that all connections are ok
+		}
 	}
 
 	for id := range n.reconnC {
-		n.logger.Printf("Requested reconnection for node with id - %v\n", id)
+		n.logger.Printf("Requested reconnection for node with id: %v\n", id)
 		if connectionTrack.CompareAndSwap(id, true, false) { // Defence from double Dialing
 			go func(id int) {
 				defer connectionTrack.Store(id, true) // Allow to new Recconnection error to proceed
@@ -316,7 +320,9 @@ func (n *Node) ImmediateElection() {
 	n.ResetElectionTimer()
 
 	for id := range n.ids {
-		go n.MakeVoteCall(id, args, countVote)
+		if id != n.id {
+			go n.MakeVoteCall(id, args, countVote)
+		}
 	}
 
 	n.GatherQuorumOrRetry(countVote, quorum)
@@ -426,7 +432,9 @@ func (n *Node) ServeClients() {
 
 		n.logger.Println("Begin Replication...")
 		for id := range n.ids {
-			go n.Replicate(id, args)
+			if id != n.id {
+				go n.Replicate(id, args)
+			}
 		}
 		if n.state.role.Whoami() == Follower {
 			n.logger.Println("Stop serving clients because transited Leader -> Follower")
@@ -444,26 +452,28 @@ func (n *Node) AuthorityHeartbeats() {
 		case <-ti.C:
 			n.logger.Println("Make Heartbeat")
 			for id := range n.ids {
-				go func(id int) {
-					reply := new(AppendEntriesResult)
-					err := n.GetClient(id).Call("Node.AppendEntries", emptyArgs, reply)
-					if err != nil {
-						n.logger.Printf("Error on heartbeat. Client - %v. Requesting reconnection...\n", id)
-						n.reconnC <- id // Request reconnection to node
-						return          // This RequestVote call failed, no retries
-					}
-					if !reply.success {
-						ps := n.state.persistentState
-						currentTerm := ps.CurrentTerm()
-						if currentTerm < reply.term {
-							n.logger.Printf("Error on heartbeat. Observed higher term Client - %v. Local term - %v, Observed term - %v.Stop heartbeats\n", id, currentTerm, reply.term)
-							ps.SetTerm(reply.term)
-							stopBeatsC <- struct{}{}
-							return
+				if id != n.id {
+					go func(id int) {
+						reply := new(AppendEntriesResult)
+						err := n.GetClient(id).Call("Node.AppendEntries", emptyArgs, reply)
+						if err != nil {
+							n.logger.Printf("Error on heartbeat. Client - %v. Requesting reconnection...\n", id)
+							n.reconnC <- id // Request reconnection to node
+							return          // This RequestVote call failed, no retries
 						}
-						n.logger.Panic("Unreachable")
-					}
-				}(id)
+						if !reply.success {
+							ps := n.state.persistentState
+							currentTerm := ps.CurrentTerm()
+							if currentTerm < reply.term {
+								n.logger.Printf("Error on heartbeat. Observed higher term Client - %v. Local term - %v, Observed term - %v.Stop heartbeats\n", id, currentTerm, reply.term)
+								ps.SetTerm(reply.term)
+								stopBeatsC <- struct{}{}
+								return
+							}
+							n.logger.Panic("Unreachable")
+						}
+					}(id)
+				}
 			}
 
 		case <-stopBeatsC:
@@ -526,7 +536,7 @@ func (n *Node) Commiter(currentTerm uint64) {
 		for index := N; index <= lastIndex; index++ {
 			count := 0
 			for id := range n.ids {
-				if n.state.matchIndex[id] >= N {
+				if id != n.id && n.state.matchIndex[id] >= N {
 					count++
 				}
 			}
@@ -563,8 +573,7 @@ func (n *Node) Apply() {
 
 func (n *Node) BootRun() {
 
-	// rpc.Register(new(Node))
-	// rpc.HandleHTTP()
+	rpc.Register(n)
 
 	http.HandleFunc("/replicate", func(w http.ResponseWriter, r *http.Request) {
 		// ?????????????????????????????????????????????????????????
