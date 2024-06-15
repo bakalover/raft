@@ -240,12 +240,12 @@ func (n *Node) ConnectRPC() {
 	for id := range n.reconnC {
 		if connectionTrack.CompareAndSwap(id, true, false) { // Defence from double Dialing
 			go func(id int) {
+				defer connectionTrack.Store(id, true) // Allow to new Recconnection error to proceed
+				defer n.UpdateClient(id, client)
 				for client, err = rpc.Dial("tcp", "node"+string(id)+":8080"); err != nil; {
 					log.Printf("error connecting to server node%v via RPC", id)
 					time.Sleep(5 * time.Millisecond)
 				}
-				n.UpdateClient(id, client)
-				connectionTrack.Store(id, true)
 			}(id)
 		}
 	}
