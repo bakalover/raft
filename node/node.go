@@ -228,15 +228,26 @@ func (n *Node) RequestVote(args *RequestVoteArgs, reply *RequestVoteResult) erro
 // Recieve reconnection signals via chan
 func (n *Node) ConnectRPC() {
 	var (
-		client *rpc.Client
-		err    error
+		client          *rpc.Client
+		err             error
+		connectionTrack sync.Map
 	)
+
+	for id := range n.ids {
+		connectionTrack.Store(id, true) // Assuming that all connections are ok
+	}
+
 	for id := range n.reconnC {
-		for client, err = rpc.Dial("tcp", "node"+string(id)+":8080"); err != nil; {
-			log.Printf("error connecting to server node%v via RPC", id)
-			time.Sleep(5 * time.Millisecond)
+		if connectionTrack.CompareAndSwap(id, true, false) { // Defence from double Dialing
+			go func(id int) {
+				for client, err = rpc.Dial("tcp", "node"+string(id)+":8080"); err != nil; {
+					log.Printf("error connecting to server node%v via RPC", id)
+					time.Sleep(5 * time.Millisecond)
+				}
+				n.UpdateClient(id, client)
+				connectionTrack.Store(id, true)
+			}(id)
 		}
-		n.UpdateClient(id, client)
 	}
 }
 
@@ -487,7 +498,7 @@ func (n *Node) Apply() {
 		n.state.stateMu.Unlock()
 
 		if ci > n.state.lastApplied {
-			// Apply to machine
+			// Apply to machine and respond to client
 		}
 	}
 }
@@ -522,13 +533,10 @@ func (n *Node) BootRun() {
 	//	if we encounter node death
 
 	go n.ConnectRPC()
-
+	go n.Apply()
 	go n.DefferedElection()
 
-	go n.Apply()
-
 	n.InitConnections()
-
 	http.ListenAndServe("node"+string(n.id)+":8080", nil)
 }
 
