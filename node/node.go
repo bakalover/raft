@@ -494,7 +494,7 @@ func (n *Node) Replicate(id int, args *AppendEntriesArgs) {
 				ps.SetTerm(reply.term)
 				n.state.role.TransitTo(Follower)
 				return
-			} else { // Seek over incosistent log
+			} else { // Seek over inconsistent log
 				n.state.stateMu.Lock()
 				if n.state.nextIndex[id] == 0 {
 					n.logger.Panic("While seeking on other node's log: n.state.nextIndex[id] == 0")
