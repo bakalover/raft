@@ -12,4 +12,4 @@ ___
 ### [Jmeter](https://jmeter.apache.org/) Metrics
 ___
 ### Reference
-- [Raft](https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://raft.github.io/raft.pdf&ved=2ahUKEwi_9NeF2vmFAxWKgSoKHYjOAcMQFnoECAYQAQ&usg=AOvVaw3DlZnK2c75fpFT0lAXbwQn)
+- [Raft](https://raft.github.io/raft.pdf)
