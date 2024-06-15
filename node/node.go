@@ -304,7 +304,9 @@ func (n *Node) MakeVoteCall(id int, args *RequestVoteArgs, c chan<- Vote) {
 }
 
 func (n *Node) TransitToCandidate() uint64 {
-	term := n.state.persistentState.IncrementAndFetchTerm()
+	ps := n.state.persistentState
+	term := ps.IncrementAndFetchTerm()
+	ps.SetVotedFor(NULL_CANDIDATE_ID) // Prepare slot for votedFor
 	n.state.role.TransitTo(Candidate)
 	return term
 }
