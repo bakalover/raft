@@ -19,6 +19,6 @@ ___
 - `PG_PASS`
 - `PG_DB`
 - `PG_PORT`
-2) `go run main.go <id> <ids>` inside node/cmd directory. Id stands for current node id, so it should be unique. Ids stand for node number in whole cluster, this number should be equal in all node's setups.
+2) `go run main.go <id> <ids>` inside node/cmd directory. Id stands for current node id, so it should be unique. Ids stand for node number in whole cluster, this number should be equal in all node's setups. IDS SHOULD BE ODD!!!
 ### Reference
 - [Raft](https://raft.github.io/raft.pdf)

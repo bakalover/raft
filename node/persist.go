@@ -21,6 +21,7 @@ type LogEntry struct {
 }
 
 type TermState struct {
+	gorm.Model
 	CurrentTerm uint64
 	VotedFor    string
 }
@@ -133,6 +134,7 @@ func (p *PersistentState) Set(term uint64, votedFor string) {
 	t.CurrentTerm = term
 	txn.
 		Table(p.nodePrefix + TermStateTableSuffix).
+		Where("id = 1").
 		Save(&t)
 	txn.Commit()
 }

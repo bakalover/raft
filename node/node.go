@@ -40,20 +40,19 @@ type Node struct {
 	// Channel for clients commands
 	clientC       chan string
 	state         *State
-	electionTimer time.Timer
+	electionTimer *time.Timer
 	logger        *log.Logger
 }
 
 func NewNode(id int, ids int) *Node {
-	countWithoutMe := ids - 1
-	nextIndex := make([]uint64, countWithoutMe)
-	matchIndex := make([]uint64, countWithoutMe)
-	reconnClients := make([]*rpc.Client, countWithoutMe)
+	nextIndex := make([]uint64, ids)
+	matchIndex := make([]uint64, ids)
+	reconnClients := make([]*rpc.Client, ids)
 	reconnC := make(chan int)
 	logger := log.New(os.Stdout, "[INFO]", log.Lshortfile|log.Ltime|log.Lmicroseconds)
 	electionTimer := time.NewTimer(ElectionTimeout())
 
-	for i := range countWithoutMe {
+	for i := range ids {
 		nextIndex[i] = 1
 		matchIndex[i] = 0
 	}
@@ -74,7 +73,7 @@ func NewNode(id int, ids int) *Node {
 		reconnC:       reconnC,
 		state:         state,
 		logger:        logger,
-		electionTimer: *electionTimer,
+		electionTimer: electionTimer,
 	}
 }
 
@@ -94,14 +93,18 @@ func (n *Node) GetClient(id int) *rpc.Client {
 func ElectionTimeout() time.Duration {
 	seconds := rand.Intn(ElectionTimeoutSeconds) + ElectionTimeoutSecondsLowerBorder
 	milliseconds := rand.Intn(ElectionTimeoutMilliseconds)
-	return time.Duration(seconds)*time.Second + time.Duration(milliseconds)*time.Millisecond
+	d := time.Duration(seconds)*time.Second + time.Duration(milliseconds)*time.Millisecond
+	log.Printf("Selected timeout: %v", d)
+	return d
 }
 
 func (n *Node) ResetElectionTimer() {
-	n.electionTimer.Stop()
-	select {
-	case <-n.electionTimer.C:
-	default:
+	n.logger.Println("Resetting election timer")
+	if !n.electionTimer.Stop() {
+		select {
+		case <-n.electionTimer.C:
+		default:
+		}
 	}
 	n.electionTimer.Reset(ElectionTimeout())
 }
@@ -276,7 +279,7 @@ func (n *Node) ConnectRPC() {
 				}()
 				for client, err = rpc.Dial("tcp", "node"+strconv.Itoa(id)+":8080"); err != nil; {
 					n.logger.Printf("Couldn't establish connection to node%v via RPC. Retrying...\n", id)
-					time.Sleep(5 * time.Millisecond)
+					time.Sleep(500 * time.Millisecond)
 				}
 			}(id)
 		}
@@ -318,7 +321,6 @@ func (n *Node) ImmediateElection() {
 	// Begin election process
 	// If timeout occures -> transit into next term and then retry election
 	n.ResetElectionTimer()
-
 	for id := range n.ids {
 		if id != n.id {
 			go n.MakeVoteCall(id, args, countVote)
@@ -331,7 +333,11 @@ func (n *Node) ImmediateElection() {
 func (n *Node) MakeVoteCall(id int, args *RequestVoteArgs, c chan<- Vote) {
 	reply := new(RequestVoteResult)
 	ps := n.state.persistentState
-	err := n.GetClient(id).Call("Node.RequestVote", args, reply)
+	client := n.GetClient(id)
+	if client == nil {
+		return
+	}
+	err := client.Call("Node.RequestVote", args, reply)
 	if err != nil {
 		n.logger.Printf("Error in Node.RequestVote Call: %v on Client - %v. Requesting reconnection...\n", err, id)
 		n.reconnC <- id // Request reconnection to node
@@ -363,6 +369,7 @@ func (n *Node) TransitToCandidate() uint64 {
 }
 
 func (n *Node) GatherQuorumOrRetry(c <-chan Vote, atLeast int) {
+	n.logger.Println("Gathering vote quorum...")
 	gotVotes := 0
 	for {
 		select {
@@ -574,7 +581,6 @@ func (n *Node) Apply() {
 func (n *Node) BootRun() {
 
 	rpc.Register(n)
-
 	http.HandleFunc("/replicate", func(w http.ResponseWriter, r *http.Request) {
 		// ?????????????????????????????????????????????????????????
 		// command := r.FormValue("command")
@@ -604,7 +610,8 @@ func (n *Node) BootRun() {
 	go n.DefferedElection()
 
 	n.InitConnections()
-	http.ListenAndServe("node"+strconv.Itoa(n.id)+":8080", nil)
+	// log.Println(http.ListenAndServe("node"+strconv.Itoa(n.id)+":8080", nil))
+	http.ListenAndServe(":8080", nil)
 }
 
 func (n *Node) InitConnections() {
