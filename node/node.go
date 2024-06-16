@@ -21,7 +21,7 @@ const (
 	AuthorityTimeout                       = 200 * time.Millisecond
 	ElectionTimeoutMilliseconds            = 100
 	ElectionTimeoutMillisecondsLowerBorder = 300
-	CommiterTick                           = 300 * time.Millisecond
+	CommiterTick                           = 3000 * time.Millisecond
 )
 
 type State struct {
@@ -96,6 +96,10 @@ func (n *Node) GetClient(id int) proto.NodeClient {
 	return n.reconnClients[id]
 }
 
+func Quorum(n int) int {
+	return (n + 1) / 2
+}
+
 func ElectionTimeout() time.Duration {
 	millis := rand.Intn(ElectionTimeoutMilliseconds) + ElectionTimeoutMillisecondsLowerBorder
 	d := time.Duration(millis) * time.Millisecond
@@ -120,20 +124,6 @@ func (n *Node) Nop(ctx context.Context, args *proto.Empty) (*proto.Empty, error)
 }
 
 // =======================================Appending=======================================
-// type AppendEntriesArgs struct {
-// 	Term         uint64
-// 	LeaderId     string
-// 	PrevLogIndex uint64
-// 	PrevLogTerm  uint64
-// 	Entries      []string
-// 	LeaderCommit uint64
-// }
-
-// type AppendEntriesResult struct {
-// 	Term    uint64
-// 	Success bool
-// }
-
 func (n *Node) AppendEntries(ctx context.Context, args *proto.AppendEntriesArgs) (*proto.AppendEntriesResult, error) {
 	reply := new(proto.AppendEntriesResult)
 	ps := n.state.persistentState
@@ -200,18 +190,6 @@ func (n *Node) AppendEntries(ctx context.Context, args *proto.AppendEntriesArgs)
 //=======================================Appending=======================================
 
 //========================================Voting=========================================
-
-// type RequestVoteArgs struct {
-// 	Term         uint64
-// 	CandidateId  string
-// 	LastLogIndex uint64
-// 	LastLogTerm  uint64
-// }
-
-// type RequestVoteResult struct {
-// 	Term        uint64
-// 	VoteGranted bool
-// }
 
 func (n *Node) RequestVote(ctx context.Context, args *proto.RequestVoteArgs) (*proto.RequestVoteResult, error) {
 	reply := new(proto.RequestVoteResult)
@@ -317,7 +295,7 @@ func (n *Node) DefferedElection() {
 type Vote struct{} // Sugar
 
 func (n *Node) ImmediateElection() {
-	quorum := (n.ids - 1) / 2 //n.ids % 2 == 1
+	quorum := Quorum(n.ids) //n.ids % 2 == 1
 	ps := n.state.persistentState
 	term := n.TransitToCandidate()
 
@@ -560,7 +538,7 @@ func (n *Node) Replicate(id int, args *proto.AppendEntriesArgs) {
 
 func (n *Node) Commiter(currentTerm uint64) {
 	n.logger.Println("Begin seeking commitIndex...")
-	quorum := (n.ids - 1) / 2
+	quorum := Quorum(n.ids)
 	ps := n.state.persistentState
 	ti := time.NewTicker(CommiterTick)
 	for {
