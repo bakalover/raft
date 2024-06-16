@@ -1,5 +1,5 @@
 syntax = "proto3";
-option go_package = "github.com/bakalover/parlia/proto";
+option go_package = "github.com/bakalover/raft/proto";
 
 message AppendEntriesArgs {
   uint64 Term = 1;
@@ -27,7 +27,10 @@ message RequestVoteResult {
   bool VoteGranted = 2;
 }
 
+message Empty {}
+
 service Node {
   rpc RequestVote(RequestVoteArgs) returns (RequestVoteResult);
   rpc AppendEntries(AppendEntriesArgs) returns (AppendEntriesResult);
+  rpc Nop(Empty) returns (Empty);
 }

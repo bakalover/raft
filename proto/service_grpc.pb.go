@@ -24,6 +24,7 @@ const _ = grpc.SupportPackageIsVersion7
 type NodeClient interface {
 	RequestVote(ctx context.Context, in *RequestVoteArgs, opts ...grpc.CallOption) (*RequestVoteResult, error)
 	AppendEntries(ctx context.Context, in *AppendEntriesArgs, opts ...grpc.CallOption) (*AppendEntriesResult, error)
+	Nop(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
 }
 
 type nodeClient struct {
@@ -52,12 +53,22 @@ func (c *nodeClient) AppendEntries(ctx context.Context, in *AppendEntriesArgs, o
 	return out, nil
 }
 
+func (c *nodeClient) Nop(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error) {
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, "/Node/Nop", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // NodeServer is the server API for Node service.
 // All implementations must embed UnimplementedNodeServer
 // for forward compatibility
 type NodeServer interface {
 	RequestVote(context.Context, *RequestVoteArgs) (*RequestVoteResult, error)
 	AppendEntries(context.Context, *AppendEntriesArgs) (*AppendEntriesResult, error)
+	Nop(context.Context, *Empty) (*Empty, error)
 	mustEmbedUnimplementedNodeServer()
 }
 
@@ -70,6 +81,9 @@ func (UnimplementedNodeServer) RequestVote(context.Context, *RequestVoteArgs) (*
 }
 func (UnimplementedNodeServer) AppendEntries(context.Context, *AppendEntriesArgs) (*AppendEntriesResult, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AppendEntries not implemented")
+}
+func (UnimplementedNodeServer) Nop(context.Context, *Empty) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Nop not implemented")
 }
 func (UnimplementedNodeServer) mustEmbedUnimplementedNodeServer() {}
 
@@ -120,6 +134,24 @@ func _Node_AppendEntries_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Node_Nop_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NodeServer).Nop(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/Node/Nop",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NodeServer).Nop(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Node_ServiceDesc is the grpc.ServiceDesc for Node service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -134,6 +166,10 @@ var Node_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AppendEntries",
 			Handler:    _Node_AppendEntries_Handler,
+		},
+		{
+			MethodName: "Nop",
+			Handler:    _Node_Nop_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

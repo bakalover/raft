@@ -114,6 +114,11 @@ func (n *Node) ResetElectionTimer() {
 	n.electionTimer.Reset(ElectionTimeout())
 }
 
+func (n *Node) Nop(ctx context.Context, args *proto.Empty) (*proto.Empty, error) {
+	// Health Check
+	return nil, nil
+}
+
 // =======================================Appending=======================================
 // type AppendEntriesArgs struct {
 // 	Term         uint64
@@ -277,26 +282,22 @@ func (n *Node) ConnectRPC() {
 		n.logger.Printf("Requested reconnection for node with id: %v\n", id)
 		if connectionTrack.CompareAndSwap(id, true, false) { // Defence from double Dialing
 			go func(id int) {
-				// var (
-				// 	client proto.NodeClient
-				// 	err    error
-				// )
 				var (
-					conn *grpc.ClientConn
-					err  error
+					conn   *grpc.ClientConn
+					err    error
+					client proto.NodeClient
 				)
 				defer connectionTrack.Store(id, true) // Allow to new Recconnection error to proceed
-
-				// for client, err = rpc.DialHTTP("tcp", ":606"+strconv.Itoa(id)); err != nil; {
-				// n.logger.Printf("Couldn't establish connection to node%v via RPC: %v. Retrying...\n", id, err)
-				// time.Sleep(1 * time.Second)
-				// }
-
-				for conn, err = grpc.Dial(":606"+strconv.Itoa(id), grpc.WithTransportCredentials(insecure.NewCredentials())); err != nil; {
-					n.logger.Printf("Couldn't establish connection to node%v via RPC: %v. Retrying...\n", id, err)
-					time.Sleep(1 * time.Second)
+				for {
+					conn, _ = grpc.NewClient(":606"+strconv.Itoa(id), grpc.WithTransportCredentials(insecure.NewCredentials()))
+					client = proto.NewNodeClient(conn)
+					if _, err = client.Nop(context.Background(), nil); err != nil {
+						n.logger.Printf("Couldn't establish connection to node%v via RPC: %v. Retrying...\n", id, err)
+						time.Sleep(1 * time.Second)
+					} else {
+						break
+					}
 				}
-				client := proto.NewNodeClient(conn)
 				n.UpdateClient(id, client)
 				n.logger.Printf("Connection establish to node%v via RPC\n", id)
 			}(id)
@@ -475,7 +476,7 @@ func (n *Node) AuthorityHeartbeats() {
 	for {
 		select {
 		case <-ti.C:
-			n.logger.Println("Make Heartbeat")
+			n.logger.Println("Making Heartbeat")
 			for id := range n.ids {
 				if id != n.id {
 					go func(id int) {
@@ -645,7 +646,6 @@ func (n *Node) BootRun() {
 
 	n.InitConnections()
 	n.logger.Printf("Listening on: :606" + strconv.Itoa(n.id))
-
 	log.Panic(http.ListenAndServe(":607"+strconv.Itoa(n.id), nil))
 }
 
