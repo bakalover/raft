@@ -21,8 +21,9 @@ const (
 	AuthorityTimeout                       = 200 * time.Millisecond
 	ElectionTimeoutMilliseconds            = 100
 	ElectionTimeoutMillisecondsLowerBorder = 300
-	CommiterTick                           = 3000 * time.Millisecond
+	CommiterTick                           = 700 * time.Millisecond
 	ClientTimout                           = 3 * time.Second
+	ApplyInterval                          = 700 * time.Millisecond
 )
 
 type State struct {
@@ -44,8 +45,8 @@ type Node struct {
 	// Transfers info about which nodes is down (ids) and need to be reconnected
 	reconnC       chan int
 	reconnClients []proto.NodeClient
-	// Channel for clients commands
 	clientC       chan *AwaitableCommand
+	applyRegistry sync.Map
 	state         *State
 	electionTimer *time.Timer
 	logger        *log.Logger
@@ -58,6 +59,7 @@ func NewNode(id int, ids int) *Node {
 	reconnC := make(chan int)
 	logger := log.New(os.Stdout, "[INFO] ", log.Lshortfile|log.Ltime|log.Lmicroseconds)
 	electionTimer := time.NewTimer(ElectionTimeout())
+	clientC := make(chan *AwaitableCommand)
 
 	for i := range ids {
 		nextIndex[i] = 1
@@ -78,6 +80,7 @@ func NewNode(id int, ids int) *Node {
 		ids:           ids,
 		reconnClients: reconnClients,
 		reconnC:       reconnC,
+		clientC:       clientC,
 		state:         state,
 		logger:        logger,
 		electionTimer: electionTimer,
@@ -412,7 +415,6 @@ func (n *Node) ServeClients() {
 	currentTerm := ps.CurrentTerm()
 
 	go n.Commiter(currentTerm)
-
 	for upd := range n.clientC {
 		n.logger.Printf("Recieved command from client: %v\n", upd)
 
@@ -421,6 +423,7 @@ func (n *Node) ServeClients() {
 
 		n.logger.Println("Appending command to local Leader log")
 		ps.AppendToLog(currentTerm, last.Index+1, entries)
+		n.applyRegistry.Store(last.Index+1, upd) // Memorize to answer client later via chan
 
 		n.state.stateMu.Lock()
 		ci := n.state.commitIndex
@@ -539,11 +542,11 @@ func (n *Node) Replicate(id int, args *proto.AppendEntriesArgs) {
 }
 
 func (n *Node) Commiter(currentTerm uint64) {
-	n.logger.Println("Begin seeking commitIndex...")
 	quorum := Quorum(n.ids)
 	ps := n.state.persistentState
 	ti := time.NewTicker(CommiterTick)
 	for {
+		n.logger.Println("Begin seeking commitIndex...")
 		<-ti.C
 		lastIndex := ps.LastEntry().Index
 		n.state.stateMu.Lock()
@@ -572,7 +575,7 @@ func (n *Node) Commiter(currentTerm uint64) {
 
 func (n *Node) Apply() {
 	n.logger.Println("Begin seeking applying commands to state machine...")
-	ti := time.NewTicker(30 * time.Millisecond)
+	ti := time.NewTicker(ApplyInterval)
 	for {
 		<-ti.C
 		n.state.stateMu.Lock()
@@ -581,7 +584,14 @@ func (n *Node) Apply() {
 
 		if ci > n.state.lastApplied {
 			n.logger.Println("Found command covered by commitIndex! Applying...")
-			// Apply to machine and respond to client
+			n.state.lastApplied++
+			val, loaded := n.applyRegistry.LoadAndDelete(n.state.lastApplied)
+			if !loaded {
+				n.logger.Panic("Cannot find value to apply")
+			}
+			ac := val.(*AwaitableCommand)
+			ac.c <- struct{}{} // Signal client that command is applied to at least quorum
+			// Apply to machine
 		}
 	}
 }
@@ -622,6 +632,7 @@ func (n *Node) BootRun() {
 					continue
 				}
 				http.Redirect(w, r, ":606"+leader, http.StatusMovedPermanently)
+				return
 			case Leader:
 				n.clientC <- ac
 				t := time.NewTimer(ClientTimout)
@@ -650,7 +661,7 @@ func (n *Node) BootRun() {
 	go n.Apply()
 	go n.DefferedElection()
 
-	n.logger.Printf("Listening on: :606" + strconv.Itoa(n.id))
+	n.logger.Printf("Listening on: :607" + strconv.Itoa(n.id))
 	log.Panic(http.ListenAndServe(":607"+strconv.Itoa(n.id), nil))
 }
 
