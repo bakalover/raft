@@ -16,5 +16,8 @@ func main() {
 	if err != nil {
 		panic("ids argument must be an integer!")
 	}
+	if ids%2 == 0 {
+		panic("ids must be odd!")
+	}
 	node.NewNode(id, ids).BootRun()
 }

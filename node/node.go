@@ -22,6 +22,7 @@ const (
 	ElectionTimeoutMilliseconds            = 100
 	ElectionTimeoutMillisecondsLowerBorder = 300
 	CommiterTick                           = 3000 * time.Millisecond
+	ClientTimout                           = 3 * time.Second
 )
 
 type State struct {
@@ -44,7 +45,7 @@ type Node struct {
 	reconnC       chan int
 	reconnClients []proto.NodeClient
 	// Channel for clients commands
-	clientC       chan string
+	clientC       chan *AwaitableCommand
 	state         *State
 	electionTimer *time.Timer
 	logger        *log.Logger
@@ -141,6 +142,7 @@ func (n *Node) AppendEntries(ctx context.Context, args *proto.AppendEntriesArgs)
 				ps.SetTerm(args.Term)
 			}
 			reply.Success = true
+			ps.SetVotedFor(args.LeaderId) //???????????????????
 		}
 		return reply, nil
 	}
@@ -414,7 +416,7 @@ func (n *Node) ServeClients() {
 	for upd := range n.clientC {
 		n.logger.Printf("Recieved command from client: %v\n", upd)
 
-		entries := []string{upd} // TODO: batches
+		entries := []string{upd.command} // TODO: batches
 		last := ps.LastEntry()
 
 		n.logger.Println("Appending command to local Leader log")
@@ -584,6 +586,16 @@ func (n *Node) Apply() {
 	}
 }
 
+type AwaitableCommand struct {
+	command string
+	c       chan struct{} // Fullfil when commited
+}
+
+func NewAwaitableCommand(command string) *AwaitableCommand {
+	c := make(chan struct{})
+	return &AwaitableCommand{command: command, c: c}
+}
+
 func (n *Node) BootRun() {
 
 	l, err := net.Listen("tcp", ":606"+strconv.Itoa(n.id))
@@ -595,34 +607,49 @@ func (n *Node) BootRun() {
 	go grpcServer.Serve(l)
 
 	http.HandleFunc("/replicate", func(w http.ResponseWriter, r *http.Request) {
-		// ?????????????????????????????????????????????????????????
-		// command := r.FormValue("command")
-		// for {
-		// 	role := n.state.role.Whoami()
-		// 	switch role {
-		// 	case Follower:
-		// 		leader := n.state.persistentState.VotedFor()
-		// 		if leader == NullCanidateId {
-		// 			time.Sleep(5 * time.Millisecond)
-		// 			continue
-		// 		}
-		// 		http.Redirect(w, r, leader+":6060", http.StatusMovedPermanently)
-		// 	case Leader:
-		// 	case Candidate:
-		// 	}
-		// }
+		command := r.FormValue("command")
+		ac := NewAwaitableCommand(command)
+
+		for {
+			role := n.state.role.Whoami()
+			switch role {
+			case Follower:
+				// Eventually under heartbeats all followers will store leader here
+				// Theoretically does not violate whole protocol
+				leader := n.state.persistentState.VotedFor()
+				if leader == NullCandidateId {
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+				http.Redirect(w, r, ":606"+leader, http.StatusMovedPermanently)
+			case Leader:
+				n.clientC <- ac
+				t := time.NewTimer(ClientTimout)
+				select { // Timeout with commiting after client retry lead to "more than exactly once"
+				case <-ac.c:
+					w.WriteHeader(http.StatusOK)
+					return
+				case <-t.C:
+					w.WriteHeader(http.StatusRequestTimeout)
+					return
+				}
+			case Candidate:
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+		}
 	})
 
 	//	First of all we need to establish rpc connections
 	// 	with all nodes (excluding caller)
 	// 	We will use that subroutine to reconnect rpc via channel signal
 	//	if we encounter node death
-
 	go n.ConnectRPC()
+	n.InitConnections()
+
 	go n.Apply()
 	go n.DefferedElection()
 
-	n.InitConnections()
 	n.logger.Printf("Listening on: :606" + strconv.Itoa(n.id))
 	log.Panic(http.ListenAndServe(":607"+strconv.Itoa(n.id), nil))
 }
