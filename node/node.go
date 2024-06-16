@@ -165,11 +165,8 @@ func (n *Node) AppendEntries(ctx context.Context, args *proto.AppendEntriesArgs)
 	// Seek same log position. If we have 0 - ok, just append
 	if args.PrevLogIndex > 0 {
 		e := ps.NthEntry(args.PrevLogIndex)
-		if e == nil {
-			n.logger.Panic("Nil Nth entry!")
-		}
-		n.logger.Printf("Seeking: current term and index: %v, %v. Needed term - %v\n", e.Term, e.Index, args.PrevLogIndex)
-		if e == nil || e.Term != args.PrevLogIndex {
+		if e == nil || e.Term != args.PrevLogTerm {
+			n.logger.Println("Seek inconsistent log back while appending")
 			reply.Success = false
 			return reply, nil
 		}
@@ -424,7 +421,7 @@ func (n *Node) ServeClients() {
 		n.logger.Println("Appending command to local Leader log")
 		ps.AppendToLog(currentTerm, last.Index+1, entries)
 		n.applyRegistry.Store(last.Index+1, upd) // Memorize to answer client later via chan
-
+		n.logger.Printf("Stored into applyRegistry key - %v", last.Index+1)
 		n.state.stateMu.Lock()
 		ci := n.state.commitIndex
 		n.state.stateMu.Unlock()
@@ -440,9 +437,11 @@ func (n *Node) ServeClients() {
 
 		n.logger.Println("Begin Replication...")
 		for id := range n.ids {
+			n.state.stateMu.Lock()
 			if id != n.id {
 				go n.Replicate(id, args)
 			}
+			n.state.stateMu.Unlock()
 		}
 		if n.state.role.Whoami() == Follower {
 			n.logger.Println("Stop serving clients because transited Leader -> Follower")
@@ -504,14 +503,24 @@ func (n *Node) AuthorityHeartbeats() {
 func (n *Node) Replicate(id int, args *proto.AppendEntriesArgs) {
 	ps := n.state.persistentState
 
+	//Need local copy to mutate prev log index if occur inconsistent log
+	argsLocalCopy := &proto.AppendEntriesArgs{
+		Term:         args.Term,
+		LeaderId:     args.LeaderId,
+		PrevLogIndex: args.PrevLogIndex,
+		PrevLogTerm:  args.PrevLogTerm,
+		Entries:      args.Entries,
+		LeaderCommit: args.LeaderCommit,
+	}
+
 	for {
 		client := n.GetClient(id)
 		if client == nil {
 			return
 		}
-		reply, err := client.AppendEntries(context.Background(), args)
-		n.logger.Printf("Error on AppendEntries Call: %v. Requesting reconnection...\n", err)
+		reply, err := client.AppendEntries(context.Background(), argsLocalCopy)
 		if err != nil {
+			n.logger.Printf("Error on AppendEntries Call: %v. Requesting reconnection...\n", err)
 			n.reconnC <- id
 			return
 		}
@@ -528,6 +537,8 @@ func (n *Node) Replicate(id int, args *proto.AppendEntriesArgs) {
 					n.logger.Panic("While seeking on other node's log: n.state.nextIndex[id] == 0")
 				}
 				n.state.nextIndex[id]--
+				argsLocalCopy.PrevLogIndex = n.state.nextIndex[id]
+				n.logger.Printf("Trying PrevLogIndex for node%v: %v", id, argsLocalCopy.PrevLogIndex)
 				n.state.stateMu.Unlock()
 				continue // retry
 			}
@@ -537,6 +548,7 @@ func (n *Node) Replicate(id int, args *proto.AppendEntriesArgs) {
 			n.state.nextIndex[id]++
 			n.logger.Printf("Updated for node%v nextIndex - %v, matchIndex - %v\n", id, n.state.nextIndex[id], n.state.matchIndex[id])
 			n.state.stateMu.Unlock()
+			return
 		}
 	}
 }
@@ -582,12 +594,12 @@ func (n *Node) Apply() {
 		ci := n.state.commitIndex
 		n.state.stateMu.Unlock()
 
-		if ci > n.state.lastApplied {
+		if ci > n.state.lastApplied && n.state.role.Whoami() == Leader {
 			n.logger.Println("Found command covered by commitIndex! Applying...")
 			n.state.lastApplied++
 			val, loaded := n.applyRegistry.LoadAndDelete(n.state.lastApplied)
 			if !loaded {
-				n.logger.Panic("Cannot find value to apply")
+				n.logger.Panicf("Cannot find value to apply by index:%v", n.state.lastApplied)
 			}
 			ac := val.(*AwaitableCommand)
 			ac.c <- struct{}{} // Signal client that command is applied to at least quorum
