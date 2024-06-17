@@ -629,7 +629,7 @@ type AwaitableCommand struct {
 }
 
 func NewAwaitableCommand(command string) *AwaitableCommand {
-	c := make(chan struct{})
+	c := make(chan struct{}, 1)
 	return &AwaitableCommand{command: command, c: c}
 }
 
