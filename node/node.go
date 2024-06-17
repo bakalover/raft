@@ -145,7 +145,7 @@ func (n *Node) AppendEntries(ctx context.Context, args *proto.AppendEntriesArgs)
 				ps.SetTerm(args.Term)
 			}
 			reply.Success = true
-			n.logger.Printf("AAAAAAAAAAAAAAAAAAAAAAAA: %v", args.LeaderId)
+			n.logger.Printf("Learn Leader from Heartbeat: %v", args.LeaderId)
 			ps.SetVotedFor(args.LeaderId)
 		}
 		return reply, nil
@@ -454,8 +454,8 @@ func (n *Node) AuthorityHeartbeats() {
 	ti := time.NewTicker(AuthorityTimeout)
 	emptyArgs := new(proto.AppendEntriesArgs)
 	emptyArgs.Term = n.state.persistentState.CurrentTerm()
-	emptyArgs.LeaderId = strconv.Itoa(n.ids)
-	stopBeatsC := make(chan struct{}, n.id)
+	emptyArgs.LeaderId = strconv.Itoa(n.id)
+	stopBeatsC := make(chan struct{}, n.ids)
 	for {
 		select {
 		case <-ti.C:
@@ -634,7 +634,6 @@ func (n *Node) BootRun() {
 	http.HandleFunc("/replicate", func(w http.ResponseWriter, r *http.Request) {
 		command := r.FormValue("command")
 		ac := NewAwaitableCommand(command)
-
 		for {
 			role := n.state.role.Whoami()
 			switch role {
@@ -647,7 +646,7 @@ func (n *Node) BootRun() {
 					continue
 				}
 				n.logger.Printf("Redirecting to Leader: node%v\n", leader)
-				http.Redirect(w, r, ":606"+leader, http.StatusMovedPermanently)
+				http.Redirect(w, r, "http://localhost:607"+leader+"/replicate", http.StatusMovedPermanently)
 				return
 			case Leader:
 				n.clientC <- ac
