@@ -3,11 +3,9 @@
 ___
 ### Features
 - Frontend - HTTP
-- Backend - intracluster RPC calls via Go's std library
-- Fault tolerant load balancing using [HAProxy](https://www.haproxy.org/)
+- Backend - intracluster RPC calls via gRPC
+- Fault tolerant load balancing using HAProxy
 - PostgreSQL as persistent storage (had big troubles with simple text files)
-- Reconfiguration (may be implemented in future)
-
 
 ___
 ### [Jmeter](https://jmeter.apache.org/) Metrics
@@ -27,5 +25,6 @@ ___
     We cannot make Quorum = 2 (because candidate is not set votedFor for itself).
     Maybe force turning to Follower inside HeartBeat RPC? It might work, but unstable and I am not sure, because it can lead to extra election iterations.
     This problem is the same for each even n.
+3) `curl  -L --post301 -i -d 'command=woopwoop' http://localhost:6070/replicate`
 ### Reference
 - [Raft](https://raft.github.io/raft.pdf)
