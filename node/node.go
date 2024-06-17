@@ -22,19 +22,9 @@ const (
 	ElectionTimeoutMilliseconds            = 100
 	ElectionTimeoutMillisecondsLowerBorder = 300
 	CommiterTick                           = 700 * time.Millisecond
-	ClientTimout                           = 3 * time.Second
+	ClientTimout                           = 6 * time.Second
 	ApplyInterval                          = 700 * time.Millisecond
 )
-
-type State struct {
-	role            *RoleStateMachine
-	persistentState *PersistentState
-	stateMu         sync.Mutex
-	commitIndex     uint64
-	lastApplied     uint64
-	nextIndex       []uint64
-	matchIndex      []uint64
-}
 
 type Node struct {
 	proto.UnimplementedNodeServer
@@ -43,13 +33,28 @@ type Node struct {
 	// Protects reconnClients
 	reconnMu sync.Mutex
 	// Transfers info about which nodes is down (ids) and need to be reconnected
-	reconnC       chan int
+	reconnC chan int
+	// Client connections to other nodes
 	reconnClients []proto.NodeClient
-	clientC       chan *AwaitableCommand
+	// Recieving commands from http clients if Leader
+	clientC chan *AwaitableCommand
+	// Keep track of commands while replicating
 	applyRegistry sync.Map
 	state         *State
 	electionTimer *time.Timer
 	logger        *log.Logger
+}
+
+type State struct {
+	// Race - free fields
+	role            *RoleStateMachine
+	persistentState *PersistentState
+	// Protects all fields below
+	stateMu     sync.Mutex
+	commitIndex uint64
+	lastApplied uint64
+	nextIndex   []uint64
+	matchIndex  []uint64
 }
 
 func NewNode(id int, ids int) *Node {
@@ -112,7 +117,7 @@ func ElectionTimeout() time.Duration {
 }
 
 func (n *Node) ResetElectionTimer() {
-	n.logger.Println("Resetting election timer")
+	n.logger.Println("Election timer reset!")
 	if !n.electionTimer.Stop() {
 		select {
 		case <-n.electionTimer.C:
@@ -123,7 +128,7 @@ func (n *Node) ResetElectionTimer() {
 }
 
 func (n *Node) Nop(ctx context.Context, args *proto.Empty) (*proto.Empty, error) {
-	// Health Check
+	// Just health Check
 	return nil, nil
 }
 
@@ -136,7 +141,7 @@ func (n *Node) AppendEntries(ctx context.Context, args *proto.AppendEntriesArgs)
 
 	// Authority Heartbeat
 	if args.Entries == nil {
-		n.logger.Println("Heartbeat!")
+		n.logger.Println("Recieved heartbeat!")
 		n.ResetElectionTimer()
 		if args.Term < currentTerm {
 			reply.Success = false
@@ -145,14 +150,14 @@ func (n *Node) AppendEntries(ctx context.Context, args *proto.AppendEntriesArgs)
 				ps.SetTerm(args.Term)
 			}
 			reply.Success = true
-			n.logger.Printf("Learn Leader from Heartbeat: %v", args.LeaderId)
+			n.logger.Printf("Learn Leader from Heartbeat: node%v\n", args.LeaderId)
 			ps.SetVotedFor(args.LeaderId)
 		}
 		return reply, nil
 	}
 
 	if args.Term < currentTerm {
-		n.logger.Printf("Reject appending: my term - %v, request term - %v\n", currentTerm, args.Term)
+		n.logger.Printf("Reject appending: my term - %v, leader term - %v\n", currentTerm, args.Term)
 		reply.Success = false
 		return reply, nil
 	}
@@ -167,7 +172,7 @@ func (n *Node) AppendEntries(ctx context.Context, args *proto.AppendEntriesArgs)
 	if args.PrevLogIndex > 0 {
 		e := ps.NthEntry(args.PrevLogIndex)
 		if e == nil || e.Term != args.PrevLogTerm {
-			n.logger.Println("Seek inconsistent log back while appending")
+			n.logger.Printf("Seek inconsistent log back while appending: Index: %v", args.PrevLogIndex)
 			reply.Success = false
 			return reply, nil
 		}
@@ -195,6 +200,7 @@ func (n *Node) AppendEntries(ctx context.Context, args *proto.AppendEntriesArgs)
 
 func (n *Node) RequestVote(ctx context.Context, args *proto.RequestVoteArgs) (*proto.RequestVoteResult, error) {
 	reply := new(proto.RequestVoteResult)
+
 	ps := n.state.persistentState
 	currentTerm := ps.CurrentTerm()
 	reply.Term = currentTerm
@@ -203,47 +209,48 @@ func (n *Node) RequestVote(ctx context.Context, args *proto.RequestVoteArgs) (*p
 		n.logger.Printf("Reject vote args.term < currentTerm: %v < %v\n", args.Term, currentTerm)
 		reply.VoteGranted = false
 		return reply, nil
-	} else {
-		votedFor := ps.VotedFor()
-		lastEntry := ps.LastEntry()
-		n.logger.Printf("Voted for: %v\n", votedFor)
+	}
 
-		if (votedFor != NullCandidateId) && (votedFor != args.CandidateId) {
-			n.logger.Printf("Reject vote. Already voted: votedFor: %v, candidate: %v\n", votedFor, args.CandidateId)
-			reply.VoteGranted = false
-			return reply, nil
-		}
+	votedFor := ps.VotedFor()
+	lastEntry := ps.LastEntry()
+	n.logger.Printf("Voted for: %v\n", votedFor)
 
-		if args.LastLogTerm < lastEntry.Term {
-			n.logger.Printf("Reject vote. Local term higher: %v < %v\n", args.LastLogIndex, lastEntry.Term)
-			reply.VoteGranted = false
-			return reply, nil
-		}
-
-		if args.LastLogTerm > lastEntry.Term {
-			reply.VoteGranted = true
-			ps.Set(args.Term, args.CandidateId)
-			n.state.role.TransitTo(Follower)
-			n.logger.Printf("Vote granted. Candidate - %v with higher term - %v. Transit to Follower\n", args.CandidateId, args.Term)
-			return reply, nil
-		}
-
-		if args.LastLogTerm == lastEntry.Term {
-			if args.LastLogIndex >= lastEntry.Index {
-				reply.VoteGranted = true
-				ps.SetVotedFor(args.CandidateId)
-				n.state.role.TransitTo(Follower)
-				n.logger.Printf("Vote granted. Candidate - %v with higher index - %v. Transit to Follower\n", args.CandidateId, args.LastLogIndex)
-				return reply, nil
-			} else {
-				n.logger.Printf("Vote rejected. Candidate - %v with lower index - %v.\n", args.CandidateId, args.LastLogIndex)
-				reply.VoteGranted = false
-				return reply, nil
-			}
-		}
-
+	if (votedFor != NullCandidateId) && (votedFor != args.CandidateId) {
+		n.logger.Printf("Reject vote. Already voted: votedFor: node%v, candidate: %v\n", votedFor, args.CandidateId)
+		reply.VoteGranted = false
 		return reply, nil
 	}
+
+	if args.LastLogTerm < lastEntry.Term {
+		n.logger.Printf("Reject vote. Local term higher: %v < %v\n", args.LastLogIndex, lastEntry.Term)
+		reply.VoteGranted = false
+		return reply, nil
+	}
+
+	if args.LastLogTerm > lastEntry.Term {
+		reply.VoteGranted = true
+		ps.Set(args.Term, args.CandidateId)
+		n.state.role.TransitTo(Follower)
+		n.logger.Printf("Vote granted. Candidate - %v with higher term - %v. Transited to Follower\n", args.CandidateId, args.Term)
+		return reply, nil
+	}
+
+	if args.LastLogTerm == lastEntry.Term {
+		if args.LastLogIndex >= lastEntry.Index {
+			reply.VoteGranted = true
+			ps.SetVotedFor(args.CandidateId)
+			n.state.role.TransitTo(Follower)
+			n.logger.Printf("Vote granted. Candidate - node%v with higher index - %v. Transited to Follower\n", args.CandidateId, args.LastLogIndex)
+			return reply, nil
+		} else {
+			n.logger.Printf("Vote rejected. Candidate - node%v with lower index - %v.\n", args.CandidateId, args.LastLogIndex)
+			reply.VoteGranted = false
+			return reply, nil
+		}
+	}
+
+	return reply, nil
+
 }
 
 //========================================Voting=========================================
@@ -260,6 +267,7 @@ func (n *Node) ConnectRPC() {
 
 	for id := range n.reconnC {
 		n.logger.Printf("Requested reconnection for node with id: %v\n", id)
+		// I recomment do not even think about what is going on below
 		if connectionTrack.CompareAndSwap(id, true, false) { // Defence from double Dialing
 			go func(id int) {
 				var (
@@ -297,7 +305,7 @@ func (n *Node) DefferedElection() {
 type Vote struct{} // Sugar
 
 func (n *Node) ImmediateElection() {
-	quorum := Quorum(n.ids) //n.ids % 2 == 1
+	quorum := Quorum(n.ids)
 	ps := n.state.persistentState
 	term := n.TransitToCandidate()
 
@@ -308,13 +316,11 @@ func (n *Node) ImmediateElection() {
 
 	// Prepare RPC args
 	last := ps.LastEntry()
-	lastLogIndex := last.Index
-	lastLogTerm := last.Term
 	args := &proto.RequestVoteArgs{
 		Term:         term,
 		CandidateId:  strconv.Itoa(n.id),
-		LastLogIndex: lastLogIndex,
-		LastLogTerm:  lastLogTerm,
+		LastLogIndex: last.Index,
+		LastLogTerm:  last.Term,
 	}
 
 	// Begin election process
@@ -337,7 +343,7 @@ func (n *Node) MakeVoteCall(id int, args *proto.RequestVoteArgs, c chan<- Vote) 
 	}
 	reply, err := client.RequestVote(context.Background(), args)
 	if err != nil {
-		n.logger.Printf("Error in Node.RequestVote Call: %v on Client - %v. Requesting reconnection...\n", err, id)
+		n.logger.Printf("Error in Node.RequestVote Call: %v on Client - %v. Reconnection requested!\n", err, id)
 		n.reconnC <- id // Request reconnection to node
 		return          // This RequestVote call failed, no retries
 	}
@@ -375,7 +381,7 @@ func (n *Node) GatherQuorumOrRetry(c <-chan Vote, atLeast int) {
 			gotVotes++
 			if gotVotes >= atLeast {
 				n.state.role.TransitTo(Leader)
-				n.logger.Println("Election Successful. Transit to Leader state")
+				n.logger.Println("Election Successful. Transited to Leader")
 				go n.ServeClients() // Start replication
 				return
 			}
@@ -397,7 +403,6 @@ func (n *Node) GatherQuorumOrRetry(c <-chan Vote, atLeast int) {
 
 func (n *Node) ServeClients() {
 	lastIndex := n.state.persistentState.LastEntry().Index
-
 	// (Reinitialized after election)
 	n.state.stateMu.Lock()
 	for i := range len(n.state.nextIndex) {
@@ -422,26 +427,12 @@ func (n *Node) ServeClients() {
 		ps.AppendToLog(currentTerm, last.Index+1, entries)
 		n.applyRegistry.Store(last.Index+1, upd) // Memorize to answer client later via chan
 		n.logger.Printf("Stored into applyRegistry key - %v", last.Index+1)
-		n.state.stateMu.Lock()
-		ci := n.state.commitIndex
-		n.state.stateMu.Unlock()
 
-		args := &proto.AppendEntriesArgs{
-			Term:         currentTerm,
-			LeaderId:     strconv.Itoa(n.id),
-			PrevLogIndex: last.Index,
-			PrevLogTerm:  last.Term,
-			Entries:      entries,
-			LeaderCommit: ci,
-		}
-
-		n.logger.Println("Begin Replication...")
+		n.logger.Println("Begin replication...")
 		for id := range n.ids {
-			n.state.stateMu.Lock()
 			if id != n.id {
-				go n.Replicate(id, args)
+				go n.Replicate(id, currentTerm, entries)
 			}
-			n.state.stateMu.Unlock()
 		}
 		if n.state.role.Whoami() == Follower {
 			n.logger.Println("Stop serving clients because transited Leader -> Follower")
@@ -469,7 +460,7 @@ func (n *Node) AuthorityHeartbeats() {
 						}
 						reply, err := client.AppendEntries(context.Background(), emptyArgs)
 						if err != nil {
-							n.logger.Printf("Error on heartbeat. Client - %v. Requesting reconnection...\n", id)
+							n.logger.Printf("Error on heartbeat. Client - %v. Reconnection requested\n", id)
 							n.reconnC <- id // Request reconnection to node
 							return          // This RequestVote call failed, no retries
 						}
@@ -501,18 +492,31 @@ func (n *Node) AuthorityHeartbeats() {
 	}
 }
 
-func (n *Node) Replicate(id int, args *proto.AppendEntriesArgs) {
+func (n *Node) Replicate(id int, currentTerm uint64, entries []string) {
 	ps := n.state.persistentState
 
 	//Need local copy to mutate prev log index if occur inconsistent log
-	argsLocalCopy := &proto.AppendEntriesArgs{
-		Term:         args.Term,
-		LeaderId:     args.LeaderId,
-		PrevLogIndex: args.PrevLogIndex,
-		PrevLogTerm:  args.PrevLogTerm,
-		Entries:      args.Entries,
-		LeaderCommit: args.LeaderCommit,
+	n.state.stateMu.Lock()
+	ci := n.state.commitIndex
+
+	lastEntry := n.state.persistentState.LastEntry()
+	prevIndex := lastEntry.Index - 1
+	var prevTerm uint64
+	if prevIndex == 0 {
+		prevTerm = 0
+	} else {
+		prevTerm = ps.NthEntry(prevIndex).Term
 	}
+
+	argsLocalCopy := &proto.AppendEntriesArgs{
+		Term:         currentTerm,
+		LeaderId:     strconv.Itoa(n.id),
+		PrevLogIndex: prevIndex,
+		PrevLogTerm:  prevTerm,
+		Entries:      entries,
+		LeaderCommit: ci,
+	}
+	n.state.stateMu.Unlock()
 
 	for {
 		client := n.GetClient(id)
@@ -528,25 +532,27 @@ func (n *Node) Replicate(id int, args *proto.AppendEntriesArgs) {
 		if !reply.Success {
 			currentTerm := ps.CurrentTerm()
 			if currentTerm < reply.Term { // Observed higher term
-				n.logger.Printf("Error on appending. Observed higher term. Client - %v. Local term - %v. Observed term - %v. Transit to Follower\n", id, currentTerm, reply.Term)
+				n.logger.Printf("Error on appending. Observed higher term. Client - %v. Local term - %v. Observed term - %v. Transited to Follower\n", id, currentTerm, reply.Term)
 				ps.SetTerm(reply.Term)
 				n.state.role.TransitTo(Follower)
 				return
 			} else { // Seek over inconsistent log
 				n.state.stateMu.Lock()
-				if n.state.nextIndex[id] == 0 {
-					n.logger.Panic("While seeking on other node's log: n.state.nextIndex[id] == 0")
+				argsLocalCopy.PrevLogIndex--
+				if argsLocalCopy.PrevLogIndex != 0 {
+					entry := ps.NthEntry(argsLocalCopy.PrevLogIndex + 1)
+					argsLocalCopy.PrevLogTerm = entry.Term
+					argsLocalCopy.Entries = append([]string{entry.Command}, argsLocalCopy.Entries...) // Prepending. If rrewinding log appending all that follower currentry dont have
+					n.logger.Printf("Command to send: %v\n", argsLocalCopy.Entries)
 				}
-				n.state.nextIndex[id]--
-				argsLocalCopy.PrevLogIndex = n.state.nextIndex[id]
-				n.logger.Printf("Trying PrevLogIndex for node%v: %v", id, argsLocalCopy.PrevLogIndex)
+				n.logger.Printf("Trying PrevLogIndex:%v for node%v", argsLocalCopy.PrevLogIndex, id)
 				n.state.stateMu.Unlock()
 				continue // retry
 			}
 		} else {
 			n.state.stateMu.Lock()
-			n.state.matchIndex[id] = n.state.nextIndex[id]
-			n.state.nextIndex[id]++
+			n.state.matchIndex[id] = lastEntry.Index
+			n.state.nextIndex[id] = lastEntry.Index + 1
 			n.logger.Printf("Updated for node%v nextIndex - %v, matchIndex - %v\n", id, n.state.nextIndex[id], n.state.matchIndex[id])
 			n.state.stateMu.Unlock()
 			return
@@ -559,11 +565,13 @@ func (n *Node) Commiter(currentTerm uint64) {
 	ps := n.state.persistentState
 	ti := time.NewTicker(CommiterTick)
 	for {
-		n.logger.Println("Begin seeking commitIndex...")
 		<-ti.C
+		n.logger.Println("Begin seeking commitIndex...")
 		lastIndex := ps.LastEntry().Index
 		n.state.stateMu.Lock()
 		N := n.state.commitIndex + 1
+		n.logger.Printf("Commiting - N = %v, lastIndex = %v", N, lastIndex)
+		n.logger.Printf("nextIndex state: %v, %v", n.state.nextIndex[1], n.state.nextIndex[2])
 		for index := N; index <= lastIndex; index++ {
 			count := 0
 			for id := range n.ids {
@@ -587,24 +595,28 @@ func (n *Node) Commiter(currentTerm uint64) {
 }
 
 func (n *Node) Apply() {
-	n.logger.Println("Begin seeking applying commands to state machine...")
 	ti := time.NewTicker(ApplyInterval)
 	for {
 		<-ti.C
+		n.logger.Println("Begin seeking applying commands to state machine...")
+
 		n.state.stateMu.Lock()
 		ci := n.state.commitIndex
 		n.state.stateMu.Unlock()
 
+		// If encounder death, it will be equivalent to rewinding
 		if ci > n.state.lastApplied {
-			n.logger.Println("Found command covered by commitIndex! Applying...")
-			n.state.lastApplied++
-			// Apply to machine
-			n.logger.Printf("New applied index: %v\n", n.state.lastApplied)
-			if n.state.role.Whoami() == Leader {
-				val, loaded := n.applyRegistry.LoadAndDelete(n.state.lastApplied)
-				if loaded {
-					ac := val.(*AwaitableCommand)
-					ac.c <- struct{}{} // Signal client that command is applied to at least quorum
+			for ci > n.state.lastApplied {
+				n.logger.Println("Found command covered by commitIndex! Applying...")
+				n.state.lastApplied++
+				// Apply to machine goes here
+				n.logger.Printf("New applied index: %v\n", n.state.lastApplied)
+				if n.state.role.Whoami() == Leader {
+					val, loaded := n.applyRegistry.LoadAndDelete(n.state.lastApplied)
+					if loaded { // If node was dead we are lost all clients. They will get timeout =)
+						ac := val.(*AwaitableCommand)
+						ac.c <- struct{}{} // Signal client that command is applied to at least quorum
+					}
 				}
 			}
 		}
@@ -613,7 +625,7 @@ func (n *Node) Apply() {
 
 type AwaitableCommand struct {
 	command string
-	c       chan struct{} // Fullfil when commited
+	c       chan struct{} // Fullfil when applied
 }
 
 func NewAwaitableCommand(command string) *AwaitableCommand {
@@ -623,6 +635,7 @@ func NewAwaitableCommand(command string) *AwaitableCommand {
 
 func (n *Node) BootRun() {
 
+	// RPC server settings
 	l, err := net.Listen("tcp", ":606"+strconv.Itoa(n.id))
 	if err != nil {
 		n.logger.Fatalf("Failed to listen: %v", err)
@@ -631,6 +644,7 @@ func (n *Node) BootRun() {
 	proto.RegisterNodeServer(grpcServer, n)
 	go grpcServer.Serve(l)
 
+	// Frontend
 	http.HandleFunc("/replicate", func(w http.ResponseWriter, r *http.Request) {
 		command := r.FormValue("command")
 		ac := NewAwaitableCommand(command)
@@ -668,7 +682,7 @@ func (n *Node) BootRun() {
 
 	//	First of all we need to establish rpc connections
 	// 	with all nodes (excluding caller)
-	// 	We will use that subroutine to reconnect rpc via channel signal
+	// 	We will use that subroutine to suto-reconnect with retry rpc via channel signal
 	//	if we encounter node death
 	go n.ConnectRPC()
 	n.InitConnections()
