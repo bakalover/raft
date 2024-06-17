@@ -145,7 +145,8 @@ func (n *Node) AppendEntries(ctx context.Context, args *proto.AppendEntriesArgs)
 				ps.SetTerm(args.Term)
 			}
 			reply.Success = true
-			ps.SetVotedFor(args.LeaderId) //???????????????????
+			n.logger.Printf("AAAAAAAAAAAAAAAAAAAAAAAA: %v", args.LeaderId)
+			ps.SetVotedFor(args.LeaderId)
 		}
 		return reply, nil
 	}
@@ -179,7 +180,6 @@ func (n *Node) AppendEntries(ctx context.Context, args *proto.AppendEntriesArgs)
 
 	n.state.stateMu.Lock()
 	if args.LeaderCommit > n.state.commitIndex {
-		//Mutex protection during compaction???
 		n.state.commitIndex = min(args.LeaderCommit, args.PrevLogIndex+uint64(len(args.Entries)))
 		n.logger.Printf("New observed commit index during appending - %v\n", n.state.commitIndex)
 	}
@@ -454,7 +454,8 @@ func (n *Node) AuthorityHeartbeats() {
 	ti := time.NewTicker(AuthorityTimeout)
 	emptyArgs := new(proto.AppendEntriesArgs)
 	emptyArgs.Term = n.state.persistentState.CurrentTerm()
-	stopBeatsC := make(chan struct{}, n.ids)
+	emptyArgs.LeaderId = strconv.Itoa(n.ids)
+	stopBeatsC := make(chan struct{}, n.id)
 	for {
 		select {
 		case <-ti.C:
@@ -594,16 +595,18 @@ func (n *Node) Apply() {
 		ci := n.state.commitIndex
 		n.state.stateMu.Unlock()
 
-		if ci > n.state.lastApplied && n.state.role.Whoami() == Leader {
+		if ci > n.state.lastApplied {
 			n.logger.Println("Found command covered by commitIndex! Applying...")
 			n.state.lastApplied++
-			val, loaded := n.applyRegistry.LoadAndDelete(n.state.lastApplied)
-			if !loaded {
-				n.logger.Panicf("Cannot find value to apply by index:%v", n.state.lastApplied)
-			}
-			ac := val.(*AwaitableCommand)
-			ac.c <- struct{}{} // Signal client that command is applied to at least quorum
 			// Apply to machine
+			n.logger.Printf("New applied index: %v\n", n.state.lastApplied)
+			if n.state.role.Whoami() == Leader {
+				val, loaded := n.applyRegistry.LoadAndDelete(n.state.lastApplied)
+				if loaded {
+					ac := val.(*AwaitableCommand)
+					ac.c <- struct{}{} // Signal client that command is applied to at least quorum
+				}
+			}
 		}
 	}
 }
@@ -643,6 +646,7 @@ func (n *Node) BootRun() {
 					time.Sleep(100 * time.Millisecond)
 					continue
 				}
+				n.logger.Printf("Redirecting to Leader: node%v\n", leader)
 				http.Redirect(w, r, ":606"+leader, http.StatusMovedPermanently)
 				return
 			case Leader:
