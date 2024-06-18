@@ -549,12 +549,10 @@ func (n *Node) Replicate(id int, currentTerm uint64, entries []string) {
 			} else { // Seek over inconsistent log
 				n.state.stateLock.Lock()
 				argsLocalCopy.PrevLogIndex--
-				if argsLocalCopy.PrevLogIndex != 0 {
-					entry := ps.NthEntry(argsLocalCopy.PrevLogIndex + 1)
-					argsLocalCopy.PrevLogTerm = entry.Term
-					argsLocalCopy.Entries = append([]string{entry.Command}, argsLocalCopy.Entries...) // Prepending. If rrewinding log appending all that follower currentry dont have
-					n.logger.Printf("Command to send: %v\n", argsLocalCopy.Entries)
-				}
+				entry := ps.NthEntry(argsLocalCopy.PrevLogIndex + 1)
+				argsLocalCopy.PrevLogTerm = entry.Term
+				argsLocalCopy.Entries = append([]string{entry.Command}, argsLocalCopy.Entries...) // Prepending. If rrewinding log appending all that follower currentry dont have
+				n.logger.Printf("Command to send: %v\n", argsLocalCopy.Entries)
 				n.logger.Printf("Trying PrevLogIndex:%v for node%v", argsLocalCopy.PrevLogIndex, id)
 				n.state.stateLock.Unlock()
 				continue // retry
