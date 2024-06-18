@@ -18,8 +18,8 @@ ___
 - `PG_DB`
 - `PG_PORT`
 2) `go run main.go <id> <ids>` inside node/cmd directory. 
-    - Id stands for current node id, so it should be unique. Ids stand for node number in whole cluster, this number should be equal in all node's setups.
-    - Ids should be odd. Why? Consider case when we have just 2 nodes.
+    - `<id>` stands for current node id, so it should be unique. Ids stand for node number in whole cluster, this number should be equal in all node's setups.
+    - `<ids>` should be odd. Why? Consider case when we have just 2 nodes.
     Each voted for another and both think it is a Leader (Pure brain split,
     I've observed 2 nodes sending heartbeats and accepting it from each other).
     We cannot make Quorum = 2 (because candidate is not set votedFor for itself).

@@ -21,9 +21,9 @@ const (
 	AuthorityTimeout                       = 200 * time.Millisecond
 	ElectionTimeoutMilliseconds            = 100
 	ElectionTimeoutMillisecondsLowerBorder = 300
-	CommiterTick                           = 700 * time.Millisecond
+	CommiterTick                           = 100 * time.Millisecond
 	ClientTimout                           = 6 * time.Second
-	ApplyInterval                          = 700 * time.Millisecond
+	ApplyInterval                          = 100 * time.Millisecond
 )
 
 type Node struct {
@@ -31,13 +31,13 @@ type Node struct {
 	id  int
 	ids int
 	// Protects reconnClients
-	reconnMu sync.Mutex
+	reconnLock sync.Mutex
 	// Transfers info about which nodes is down (ids) and need to be reconnected
-	reconnC chan int
+	reconnChan chan int
 	// Client connections to other nodes
 	reconnClients []proto.NodeClient
 	// Recieving commands from http clients if Leader
-	clientC chan *AwaitableCommand
+	clientChan chan *AwaitableCommand
 	// Keep track of commands while replicating
 	applyRegistry sync.Map
 	state         *State
@@ -50,7 +50,7 @@ type State struct {
 	role            *RoleStateMachine
 	persistentState *PersistentState
 	// Protects all fields below
-	stateMu     sync.Mutex
+	stateLock   sync.Mutex
 	commitIndex uint64
 	lastApplied uint64
 	nextIndex   []uint64
@@ -61,10 +61,10 @@ func NewNode(id int, ids int) *Node {
 	nextIndex := make([]uint64, ids)
 	matchIndex := make([]uint64, ids)
 	reconnClients := make([]proto.NodeClient, ids)
-	reconnC := make(chan int)
+	reconnChan := make(chan int)
 	logger := log.New(os.Stdout, "[INFO] ", log.Lshortfile|log.Ltime|log.Lmicroseconds)
 	electionTimer := time.NewTimer(ElectionTimeout())
-	clientC := make(chan *AwaitableCommand)
+	clientChan := make(chan *AwaitableCommand)
 
 	for i := range ids {
 		nextIndex[i] = 1
@@ -84,8 +84,8 @@ func NewNode(id int, ids int) *Node {
 		id:            id,
 		ids:           ids,
 		reconnClients: reconnClients,
-		reconnC:       reconnC,
-		clientC:       clientC,
+		reconnChan:    reconnChan,
+		clientChan:    clientChan,
 		state:         state,
 		logger:        logger,
 		electionTimer: electionTimer,
@@ -93,15 +93,15 @@ func NewNode(id int, ids int) *Node {
 }
 
 func (n *Node) UpdateClient(id int, c proto.NodeClient) {
-	n.reconnMu.Lock()
-	defer n.reconnMu.Unlock()
+	n.reconnLock.Lock()
+	defer n.reconnLock.Unlock()
 	n.reconnClients[id] = c
 	n.logger.Printf("New rpc client for id - %v\n", id)
 }
 
 func (n *Node) GetClient(id int) proto.NodeClient {
-	n.reconnMu.Lock()
-	defer n.reconnMu.Unlock()
+	n.reconnLock.Lock()
+	defer n.reconnLock.Unlock()
 	return n.reconnClients[id]
 }
 
@@ -183,12 +183,12 @@ func (n *Node) AppendEntries(ctx context.Context, args *proto.AppendEntriesArgs)
 	// Batch append starts with current [prevLogIndex + 1] position
 	ps.AppendToLog(args.Term, args.PrevLogIndex+1, args.Entries)
 
-	n.state.stateMu.Lock()
+	n.state.stateLock.Lock()
 	if args.LeaderCommit > n.state.commitIndex {
 		n.state.commitIndex = min(args.LeaderCommit, args.PrevLogIndex+uint64(len(args.Entries)))
 		n.logger.Printf("New observed commit index during appending - %v\n", n.state.commitIndex)
 	}
-	n.state.stateMu.Unlock()
+	n.state.stateLock.Unlock()
 
 	reply.Success = true
 	return reply, nil
@@ -256,7 +256,7 @@ func (n *Node) RequestVote(ctx context.Context, args *proto.RequestVoteArgs) (*p
 //========================================Voting=========================================
 
 // Recieve reconnection signals via chan
-func (n *Node) ConnectRPC() {
+func (n *Node) ReconnectActivity() {
 	var connectionTrack sync.Map
 
 	for id := range n.ids {
@@ -265,7 +265,7 @@ func (n *Node) ConnectRPC() {
 		}
 	}
 
-	for id := range n.reconnC {
+	for id := range n.reconnChan {
 		n.logger.Printf("Requested reconnection for node with id: %v\n", id)
 		// I recomment do not even think about what is going on below
 		if connectionTrack.CompareAndSwap(id, true, false) { // Defence from double Dialing
@@ -328,14 +328,14 @@ func (n *Node) ImmediateElection() {
 	n.ResetElectionTimer()
 	for id := range n.ids {
 		if id != n.id {
-			go n.MakeVoteCall(id, args, countVote)
+			go n.RequestVoteAnalyze(id, args, countVote)
 		}
 	}
 
 	n.GatherQuorumOrRetry(countVote, quorum)
 }
 
-func (n *Node) MakeVoteCall(id int, args *proto.RequestVoteArgs, c chan<- Vote) {
+func (n *Node) RequestVoteAnalyze(id int, args *proto.RequestVoteArgs, c chan<- Vote) {
 	ps := n.state.persistentState
 	client := n.GetClient(id)
 	if client == nil {
@@ -343,9 +343,9 @@ func (n *Node) MakeVoteCall(id int, args *proto.RequestVoteArgs, c chan<- Vote) 
 	}
 	reply, err := client.RequestVote(context.Background(), args)
 	if err != nil {
-		n.logger.Printf("Error in Node.RequestVote Call: %v on Client - %v. Reconnection requested!\n", err, id)
-		n.reconnC <- id // Request reconnection to node
-		return          // This RequestVote call failed, no retries
+		n.logger.Printf("Error in Node.RequestVote call: %v on Client - %v. Reconnection requested!\n", err, id)
+		n.reconnChan <- id // Request reconnection to node
+		return             // This RequestVote call failed, no retries
 	}
 	if reply.VoteGranted {
 		c <- Vote{} // (!) May blocks forever without buffer!!
@@ -388,7 +388,7 @@ func (n *Node) GatherQuorumOrRetry(c <-chan Vote, atLeast int) {
 		case <-n.electionTimer.C:
 			// Just starting another Immediate election if that fails
 			// In case there is Follower state (stored during parallel AppendEntries call -> start Deffered Election)
-			n.logger.Println("Election timeout occur while gathering vote quorum")
+			n.logger.Println("Election timeout occured while gathering vote quorum")
 			if n.state.role.Whoami() == Follower {
 				n.logger.Println("Someone made me Follower while Appending during my election")
 				go n.DefferedElection()
@@ -404,20 +404,20 @@ func (n *Node) GatherQuorumOrRetry(c <-chan Vote, atLeast int) {
 func (n *Node) ServeClients() {
 	lastIndex := n.state.persistentState.LastEntry().Index
 	// (Reinitialized after election)
-	n.state.stateMu.Lock()
+	n.state.stateLock.Lock()
 	for i := range len(n.state.nextIndex) {
 		n.state.nextIndex[i] = lastIndex + 1
 		n.state.matchIndex[i] = 0
 	}
-	n.state.stateMu.Unlock()
+	n.state.stateLock.Unlock()
 
 	go n.AuthorityHeartbeats()
 
 	ps := n.state.persistentState
 	currentTerm := ps.CurrentTerm()
+	go n.CommitActivity(currentTerm)
 
-	go n.Commiter(currentTerm)
-	for upd := range n.clientC {
+	for upd := range n.clientChan {
 		n.logger.Printf("Recieved command from client: %v\n", upd)
 
 		entries := []string{upd.command} // TODO: batches
@@ -461,8 +461,8 @@ func (n *Node) AuthorityHeartbeats() {
 						reply, err := client.AppendEntries(context.Background(), emptyArgs)
 						if err != nil {
 							n.logger.Printf("Error on heartbeat. Client - %v. Reconnection requested\n", id)
-							n.reconnC <- id // Request reconnection to node
-							return          // This RequestVote call failed, no retries
+							n.reconnChan <- id // Request reconnection to node
+							return             // This RequestVote call failed, no retries
 						}
 						if !reply.Success {
 							ps := n.state.persistentState
@@ -496,7 +496,7 @@ func (n *Node) Replicate(id int, currentTerm uint64, entries []string) {
 	ps := n.state.persistentState
 
 	//Need local copy to mutate prev log index if occur inconsistent log
-	n.state.stateMu.Lock()
+	n.state.stateLock.Lock()
 	ci := n.state.commitIndex
 
 	lastEntry := n.state.persistentState.LastEntry()
@@ -516,7 +516,7 @@ func (n *Node) Replicate(id int, currentTerm uint64, entries []string) {
 		Entries:      entries,
 		LeaderCommit: ci,
 	}
-	n.state.stateMu.Unlock()
+	n.state.stateLock.Unlock()
 
 	for {
 		client := n.GetClient(id)
@@ -526,7 +526,7 @@ func (n *Node) Replicate(id int, currentTerm uint64, entries []string) {
 		reply, err := client.AppendEntries(context.Background(), argsLocalCopy)
 		if err != nil {
 			n.logger.Printf("Error on AppendEntries Call: %v. Requesting reconnection...\n", err)
-			n.reconnC <- id
+			n.reconnChan <- id
 			return
 		}
 		if !reply.Success {
@@ -537,7 +537,7 @@ func (n *Node) Replicate(id int, currentTerm uint64, entries []string) {
 				n.state.role.TransitTo(Follower)
 				return
 			} else { // Seek over inconsistent log
-				n.state.stateMu.Lock()
+				n.state.stateLock.Lock()
 				argsLocalCopy.PrevLogIndex--
 				if argsLocalCopy.PrevLogIndex != 0 {
 					entry := ps.NthEntry(argsLocalCopy.PrevLogIndex + 1)
@@ -546,21 +546,21 @@ func (n *Node) Replicate(id int, currentTerm uint64, entries []string) {
 					n.logger.Printf("Command to send: %v\n", argsLocalCopy.Entries)
 				}
 				n.logger.Printf("Trying PrevLogIndex:%v for node%v", argsLocalCopy.PrevLogIndex, id)
-				n.state.stateMu.Unlock()
+				n.state.stateLock.Unlock()
 				continue // retry
 			}
 		} else {
-			n.state.stateMu.Lock()
+			n.state.stateLock.Lock()
 			n.state.matchIndex[id] = lastEntry.Index
 			n.state.nextIndex[id] = lastEntry.Index + 1
 			n.logger.Printf("Updated for node%v nextIndex - %v, matchIndex - %v\n", id, n.state.nextIndex[id], n.state.matchIndex[id])
-			n.state.stateMu.Unlock()
+			n.state.stateLock.Unlock()
 			return
 		}
 	}
 }
 
-func (n *Node) Commiter(currentTerm uint64) {
+func (n *Node) CommitActivity(currentTerm uint64) {
 	quorum := Quorum(n.ids)
 	ps := n.state.persistentState
 	ti := time.NewTicker(CommiterTick)
@@ -568,10 +568,10 @@ func (n *Node) Commiter(currentTerm uint64) {
 		<-ti.C
 		n.logger.Println("Begin seeking commitIndex...")
 		lastIndex := ps.LastEntry().Index
-		n.state.stateMu.Lock()
+		n.state.stateLock.Lock()
 		N := n.state.commitIndex + 1
-		n.logger.Printf("Commiting - N = %v, lastIndex = %v", N, lastIndex)
-		n.logger.Printf("nextIndex state: %v, %v", n.state.nextIndex[1], n.state.nextIndex[2])
+		n.logger.Printf("gathering commit quorum: N = %v, lastIndex = %v", N, lastIndex)
+		n.logger.Printf("nextIndex[] state: %v", n.state.nextIndex)
 		for index := N; index <= lastIndex; index++ {
 			count := 0
 			for id := range n.ids {
@@ -580,34 +580,34 @@ func (n *Node) Commiter(currentTerm uint64) {
 				}
 			}
 			if count >= quorum && currentTerm == ps.NthEntry(index).Term {
-				n.logger.Printf("Found quorum on commitIndex! New commitIndex - %v\n", N)
+				n.logger.Printf("Found commit quorum! New commitIndex - %v\n", N)
 				n.state.commitIndex = N
 			}
 		}
-		n.state.stateMu.Unlock()
+		n.state.stateLock.Unlock()
 
 		if n.state.role.Whoami() == Follower {
-			n.logger.Println("Stop seeking commitIndex because transited Leader -> Follower")
+			n.logger.Println("Stop seeking commitIndex because transited to Follower")
 			ti.Stop()
 			return
 		}
 	}
 }
 
-func (n *Node) Apply() {
+func (n *Node) ApplyActivity() {
 	ti := time.NewTicker(ApplyInterval)
 	for {
 		<-ti.C
-		n.logger.Println("Begin seeking applying commands to state machine...")
+		n.logger.Println("Begin seeking and applying commands to state machine...")
 
-		n.state.stateMu.Lock()
+		n.state.stateLock.Lock()
 		ci := n.state.commitIndex
-		n.state.stateMu.Unlock()
+		n.state.stateLock.Unlock()
 
 		// If encounder death, it will be equivalent to rewinding
 		if ci > n.state.lastApplied {
 			for ci > n.state.lastApplied {
-				n.logger.Println("Found command covered by commitIndex! Applying...")
+				n.logger.Println("Found command covered by commit index! Applying...")
 				n.state.lastApplied++
 				// Apply to machine goes here
 				n.logger.Printf("New applied index: %v\n", n.state.lastApplied)
@@ -663,7 +663,7 @@ func (n *Node) BootRun() {
 				http.Redirect(w, r, "http://localhost:607"+leader+"/replicate", http.StatusMovedPermanently)
 				return
 			case Leader:
-				n.clientC <- ac
+				n.clientChan <- ac
 				t := time.NewTimer(ClientTimout)
 				select { // Timeout with commiting after client retry lead to "more than exactly once"
 				case <-ac.c:
@@ -684,10 +684,10 @@ func (n *Node) BootRun() {
 	// 	with all nodes (excluding caller)
 	// 	We will use that subroutine to suto-reconnect with retry rpc via channel signal
 	//	if we encounter node death
-	go n.ConnectRPC()
+	go n.ReconnectActivity()
 	n.InitConnections()
 
-	go n.Apply()
+	go n.ApplyActivity()
 	go n.DefferedElection()
 
 	n.logger.Printf("Listening on: :607" + strconv.Itoa(n.id))
@@ -697,7 +697,7 @@ func (n *Node) BootRun() {
 func (n *Node) InitConnections() {
 	for id := range n.ids {
 		if id != n.id {
-			n.reconnC <- id
+			n.reconnChan <- id
 		}
 	}
 }
