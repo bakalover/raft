@@ -576,7 +576,6 @@ func (n *Node) CommitActivity(currentTerm uint64) {
 	ti := time.NewTicker(CommiterTick)
 	for {
 		<-ti.C
-		n.logger.Println("Begin seeking commitIndex...")
 		lastIndex := ps.LastEntry().Index
 		n.state.stateLock.Lock()
 		N := n.state.commitIndex + 1
@@ -608,8 +607,6 @@ func (n *Node) ApplyActivity() {
 	ti := time.NewTicker(ApplyInterval)
 	for {
 		<-ti.C
-		n.logger.Println("Begin seeking and applying commands to state machine...")
-
 		n.state.stateLock.Lock()
 		ci := n.state.commitIndex
 		n.state.stateLock.Unlock()
