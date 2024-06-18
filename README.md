@@ -1,5 +1,7 @@
 # Raft
-🥱 Just for fun
+🥱 Semi-toy implenetation of RAFT consensus protocol.\
+*Just for fun*
+
 ___
 ### Features
 - Frontend - HTTP
@@ -8,7 +10,7 @@ ___
 - PostgreSQL as persistent storage (had big troubles with simple text files)
 
 ___
-### [Jmeter](https://jmeter.apache.org/) Metrics
+### Jmeter Metrics
 ---
 ### How to run
 1) Set environmetal variables:
