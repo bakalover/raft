@@ -106,7 +106,7 @@ func (n *Node) GetClient(id int) proto.NodeClient {
 }
 
 func Quorum(n int) int {
-	return (n + 1) / 2
+	return (n - 1) / 2
 }
 
 func ElectionTimeout() time.Duration {
@@ -368,21 +368,31 @@ func (n *Node) TransitToCandidate() uint64 {
 	term := ps.IncrementAndFetchTerm()
 	ps.SetVotedFor(NullCandidateId) // Prepare slot for votedFor
 	n.state.role.TransitTo(Candidate)
-	n.logger.Printf("Transit to Candidate state. New term - %v\n", term)
+	n.logger.Printf("Transited to Candidate! New term - %v\n", term)
 	return term
+}
+
+func (n *Node) TransitToLeader() {
+	n.state.role.TransitTo(Leader)
+	n.logger.Println("Election Successful! Transited to Leader")
+	go n.ServeClients() // Start Replication
 }
 
 func (n *Node) GatherQuorumOrRetry(c <-chan Vote, atLeast int) {
 	n.logger.Println("Gathering vote quorum...")
 	gotVotes := 0
+
+	if atLeast == 0 { // Single node config
+		n.TransitToLeader()
+		return
+	}
+
 	for {
 		select {
 		case <-c:
 			gotVotes++
 			if gotVotes >= atLeast {
-				n.state.role.TransitTo(Leader)
-				n.logger.Println("Election Successful. Transited to Leader")
-				go n.ServeClients() // Start replication
+				n.TransitToLeader()
 				return
 			}
 		case <-n.electionTimer.C:
