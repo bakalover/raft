@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"os"
-	"sync"
 )
 
 var (
@@ -15,7 +14,6 @@ var (
 
 // Simple implementation of crash-tolerant append-only log using just one file
 type fileLog struct {
-	mu  sync.Mutex // Protection from concurrent compaction
 	db  *os.File
 	key string
 }
@@ -25,8 +23,6 @@ func NewFileLog(key string) Log {
 }
 
 func (f *fileLog) Destroy() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	check(f.db.Close())
 	check(os.Remove(f.key + logFileSuffix))
 }
@@ -71,11 +67,9 @@ func (f *fileLog) gotoStart() {
 }
 
 func (f *fileLog) Append(es LogEntryPack, offset uint64) {
-	f.mu.Lock()
 	defer func() {
 		f.gotoStart()
 		f.persist()
-		f.mu.Unlock()
 	}()
 	f.gotoLine(offset - 1)
 	bw := bufio.NewWriter(f.db)
@@ -89,10 +83,8 @@ func (f *fileLog) Append(es LogEntryPack, offset uint64) {
 }
 
 func (f *fileLog) At(index uint64) *LogEntry {
-	f.mu.Lock()
 	defer func() {
 		f.gotoStart()
-		f.mu.Unlock()
 	}()
 	br := bufio.NewScanner(f.db)
 	var l LogEntry
@@ -123,10 +115,8 @@ func (f *fileLog) LastTerm() uint64 {
 }
 
 func (f *fileLog) Size() uint64 {
-	f.mu.Lock()
 	defer func() {
 		f.gotoStart()
-		f.mu.Unlock()
 	}()
 	br := bufio.NewScanner(f.db)
 	size := uint64(0)
@@ -143,11 +133,9 @@ func (f *fileLog) Size() uint64 {
 // First we will create new file, then fill it with values, and at the end - atomically swap log files
 // So this operation works like CAS on your file system
 func (f *fileLog) TrimP(border uint64) {
-	f.mu.Lock()
 	defer func() {
 		f.gotoStart()
 		f.persist()
-		f.mu.Unlock()
 	}()
 	br := bufio.NewScanner(f.db)
 	f.gotoLine(border)
@@ -169,10 +157,8 @@ func (f *fileLog) TrimP(border uint64) {
 }
 
 func (f *fileLog) TrimS(border uint64) {
-	f.mu.Lock()
 	defer func() {
 		f.gotoStart()
-		f.mu.Unlock()
 	}()
 	// Atomic
 	// See: man ftruncate
