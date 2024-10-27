@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"sync"
 )
 
 var (
@@ -14,12 +15,18 @@ var (
 
 // Simple implementation of crash-tolerant append-only log using just one file
 type fileLog struct {
-	db  *os.File
+	db *os.File
+	// Protection from concurrent access on append Entries
+	// Strand will not be able to protect log if there is inconsistency in some peer's log
+	// In that case appent entries will concurrenct retry with log access on additional entries
+	// For that we need mutex. It will be applied only on At()
+	// The rest of synchronization upon Strand
+	mu  *sync.Mutex
 	key string
 }
 
 func NewFileLog(key string) Log {
-	return &fileLog{db: openFile(key + logFileSuffix), key: key}
+	return &fileLog{db: openFile(key + logFileSuffix), mu: new(sync.Mutex), key: key}
 }
 
 func (f *fileLog) Destroy() {
@@ -66,14 +73,20 @@ func (f *fileLog) gotoStart() {
 	f.gotoPos(0)
 }
 
+func (f *fileLog) gotoEnd() {
+	_, err := f.db.Seek(0, io.SeekEnd)
+	check(err)
+}
+
 func (f *fileLog) Append(es LogEntryPack, offset uint64) {
 	defer func() {
 		f.gotoStart()
 		f.persist()
 	}()
-	f.gotoLine(offset - 1)
+	f.gotoEnd()
 	bw := bufio.NewWriter(f.db)
-	for _, e := range es {
+	for i, e := range es {
+		e.Index = offset + uint64(i)
 		serialized, err := json.Marshal(e)
 		check(err)
 		_, err = bw.WriteString(string(serialized) + "\n")
@@ -85,33 +98,35 @@ func (f *fileLog) Append(es LogEntryPack, offset uint64) {
 func (f *fileLog) At(index uint64) *LogEntry {
 	defer func() {
 		f.gotoStart()
+		f.mu.Unlock()
 	}()
+	f.mu.Lock()
 	br := bufio.NewScanner(f.db)
-	var l LogEntry
-	kLine := uint64(1)
+	l := &LogEntry{}
 	var bytes []byte
 	for br.Scan() {
 		bytes = br.Bytes()
-		if kLine == index {
-			break // Never yield if index == 0 aka Last Entry
+		check(json.Unmarshal(bytes, l)) // Optimize via file seek
+		if l.Index == index {
+			return l
 		}
-		kLine++
 	}
 	check(br.Err())
-	check(json.Unmarshal(bytes, &l))
-	return &l
+	if index == LastEntry {
+		return l
+	}
+	return &LogEntry{}
 }
 
 func (f *fileLog) Term(index uint64) uint64 {
 	return f.At(index).Term
 }
 
-func (f *fileLog) LastTerm() uint64 {
-	// Non-atomic, but ok
+func (f *fileLog) LastEntry() *LogEntry {
 	if size := f.Size(); size == 0 {
-		return 0
+		return &LogEntry{} // Zero index and term
 	}
-	return f.Term(LastEntry)
+	return f.At(LastEntry)
 }
 
 func (f *fileLog) Size() uint64 {
@@ -138,7 +153,16 @@ func (f *fileLog) TrimP(border uint64) {
 		f.persist()
 	}()
 	br := bufio.NewScanner(f.db)
-	f.gotoLine(border)
+	var l LogEntry
+	var bytes []byte
+	for br.Scan() {
+		bytes = br.Bytes()
+		check(json.Unmarshal(bytes, &l))
+		if l.Index == border {
+			break
+		}
+	}
+	check(br.Err())
 	// On crash during transfer Open() will retry with truncation
 	newLog := openFile(f.key + logFileTransferSuffix)
 	bw := bufio.NewWriter(newLog)

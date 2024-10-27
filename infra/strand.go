@@ -48,7 +48,7 @@ func (s *strandImpl) runBatch() {
 }
 
 func (s *strandImpl) runBlockingCPU(b Batch) int64 {
-	runtime.LockOSThread()
+	runtime.LockOSThread() // Turn off goroutine preemption to keep caches hot
 	defer runtime.UnlockOSThread()
 	count := int64(0)
 	for b.IsNotEmpty() {
