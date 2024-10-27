@@ -35,3 +35,4 @@ Note: Depreprecated
 3) `curl  -L --post301 -i -d 'command=woopwoop' http://localhost:6070/replicate`
 ### Reference
 - [Raft](https://raft.github.io/raft.pdf)
+- [Eli Bendersky - Implementing Raft](https://eli.thegreenplace.net/2020/implementing-raft-part-0-introduction/)
