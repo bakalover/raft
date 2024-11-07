@@ -73,11 +73,6 @@ func NewRaft(c *Config) *Raft {
 	return raft
 }
 
-// RPC
-func (r *Raft) Apply(args *machine.RSMcmd, reply *RaftReply) error {
-	return nil
-}
-
 func (r *Raft) Run(ctx context.Context) {
 	rpc.Register(r)
 	rpc.HandleHTTP()
@@ -143,6 +138,51 @@ func (r *Raft) resetTimer() {
 	r.strand.Combine(reset)
 }
 
+func (r *Raft) goReconnectBlocking(peer string) {
+	do := func() {
+		for {
+			client, err := rpc.DialHTTP("tcp", peer)
+			if err != nil {
+				r.logger.Printf("Could not reconnect to peer [%s].", peer)
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			r.logger.Printf("Peer: [%s] connected!", peer)
+			r.neighbours[peer] = client
+			return
+		}
+	}
+	r.strand.Combine(do)
+}
+
+func (r *Raft) goReconnect(peer string) {
+	do := func() {
+		client, err := rpc.DialHTTP("tcp", peer)
+		if err != nil {
+			r.logger.Printf("Could not reconnect to peer [%s].", peer)
+			return
+		}
+		r.logger.Printf("Peer: [%s] connected!", peer)
+		r.neighbours[peer] = client
+	}
+	r.strand.Combine(do)
+}
+
+// RPC frontend
+func (r *Raft) Apply(args *machine.RSMcmd, reply *RaftReply) error {
+	do := func() {
+		switch r.whoAmI() {
+		case Follower:
+
+		case Candidate:
+
+		case Leader:
+		}
+	}
+
+	return nil
+}
+
 // Phase 1
 // RPC
 func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error {
@@ -168,7 +208,6 @@ func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error 
 			if args.LastTerm >= lastEntry.Term {
 				awaitReply <- &RequestVoteReply{
 					Granted: true,
-					Term:    r.term,
 				}
 				r.votedFor = args.Candidate
 				return
@@ -176,7 +215,6 @@ func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error 
 			if args.LastTerm == lastEntry.Term && args.LastIndex >= lastEntry.Index {
 				awaitReply <- &RequestVoteReply{
 					Granted: true,
-					Term:    r.term,
 				}
 				return
 			}
@@ -261,36 +299,6 @@ func (r *Raft) goElection() {
 		}
 		r.strand.Combine(backToFollower)
 	}
-}
-
-func (r *Raft) goReconnectBlocking(peer string) {
-	do := func() {
-		for {
-			client, err := rpc.DialHTTP("tcp", peer)
-			if err != nil {
-				r.logger.Printf("Could not reconnect to peer [%s].", peer)
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			r.logger.Printf("Peer: [%s] connected!", peer)
-			r.neighbours[peer] = client
-			return
-		}
-	}
-	r.strand.Combine(do)
-}
-
-func (r *Raft) goReconnect(peer string) {
-	do := func() {
-		client, err := rpc.DialHTTP("tcp", peer)
-		if err != nil {
-			r.logger.Printf("Could not reconnect to peer [%s].", peer)
-			return
-		}
-		r.logger.Printf("Peer: [%s] connected!", peer)
-		r.neighbours[peer] = client
-	}
-	r.strand.Combine(do)
 }
 
 // Phase 2
