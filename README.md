@@ -13,7 +13,7 @@ Note: refactor wip
   - Balancer -> HTTP
 - Balancing Modes
   - Round-Robin
-  - Random
+  - Random Choice
   - Leader redirection
 - Reconfiguration?
 - WIP...
