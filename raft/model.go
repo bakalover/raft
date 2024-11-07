@@ -16,8 +16,8 @@ type (
 	}
 
 	RequestVoteReply struct {
-		Granted bool
-		Term    uint64
+		Granted bool   
+		Term    uint64 
 	}
 
 	AppendEntriesArgs struct {

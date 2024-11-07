@@ -21,16 +21,11 @@ const (
 )
 
 type (
-	Raft interface {
-		Run(context.Context)
-		Park()
-		Apply(args *machine.RSMcmd, reply *RaftReply) error
-	}
-
-	raftImpl struct {
-		strand        infra.Strand // Synchronizes whole state below, except of one case inside Log 
+	Raft struct {
+		strand        infra.Strand // Synchronizes whole state below, except of one case inside Log
 		me            string
 		neighbours    map[string]*rpc.Client
+		neighboursNum int
 		electionTimer *time.Timer
 		role          Role
 		log           persistence.Log
@@ -42,6 +37,7 @@ type (
 		term          uint64
 		leader        string
 		votedFor      string
+		quorum        int
 		logger        *log.Logger
 	}
 
@@ -53,17 +49,21 @@ type (
 	}
 )
 
-func NewRaft(c *Config) Raft {
-	raft := &raftImpl{
-		strand:       infra.NewStrand(c.Ctx),
-		me:           c.Me,
-		neighbours:   make(map[string]*rpc.Client),
-		role:         Follower,
-		log:          persistence.NewFileLog(c.LogKey),
-		stateMachine: machine.NewStateMachine(),
-		nextIndex:    make(map[string]uint64),
-		matchIndex:   make(map[string]uint64),
-		logger:       log.New(os.Stdout, "INFO", log.Lmicroseconds|log.Lshortfile),
+func NewRaft(c *Config) *Raft {
+	fileLog := persistence.NewFileLog(c.LogKey)
+	raft := &Raft{
+		strand:        infra.NewStrand(c.Ctx),
+		me:            c.Me,
+		neighbours:    make(map[string]*rpc.Client),
+		neighboursNum: len(c.Neighbours),
+		role:          Follower,
+		log:           fileLog,
+		term:          fileLog.LastEntry().Term, // No need in separate term in persistence??
+		stateMachine:  machine.NewStateMachine(),
+		nextIndex:     make(map[string]uint64),
+		matchIndex:    make(map[string]uint64),
+		quorum:        len(c.Neighbours)/2 + 1,
+		logger:        log.New(os.Stdout, "INFO: ", log.Lmicroseconds|log.Lshortfile),
 	}
 	for _, n := range c.Neighbours {
 		raft.neighbours[n] = nil
@@ -74,79 +74,128 @@ func NewRaft(c *Config) Raft {
 }
 
 // RPC
-func (r *raftImpl) Apply(args *machine.RSMcmd, reply *RaftReply) error {
+func (r *Raft) Apply(args *machine.RSMcmd, reply *RaftReply) error {
 	return nil
 }
 
-func (r *raftImpl) Run(ctx context.Context) {
+func (r *Raft) Run(ctx context.Context) {
 	rpc.Register(r)
 	rpc.HandleHTTP()
 
 	wg := new(sync.WaitGroup)
 	defer wg.Wait()
 
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		r.logger.Println(http.ListenAndServe(r.me, nil))
 	}()
 
+	for peer := range r.neighbours {
+		r.goReconnectBlocking(peer) // Init Connections
+	}
+
 	// First election
 	// Timer is represented by rescheduling function that activates election process under Strand
 	// Reseting this timer is the same as election postpone
-	r.electionTimer = time.AfterFunc(timeout(), func() {
-		r.goElection()
-	})
+	firstElection := func(ctx context.Context) {
+		r.electionTimer = time.AfterFunc(timeout(), func() {
+			r.goElection()
+		})
+	}
+	r.strand.Combine(firstElection)
 }
 
-func (r *raftImpl) quorum() int {
-	return len(r.neighbours)/2 + 1
-}
-
-// base - 2xbase ms random timeout
+// base - 3xbase ms random timeout
 func timeout() time.Duration {
-	return time.Duration((timeoutBase + rand.Intn(timeoutBase))) * time.Millisecond
+	return time.Duration((timeoutBase + 2*rand.Intn(timeoutBase))) * time.Millisecond
 }
 
-func (r *raftImpl) become(role Role) {
+func (r *Raft) become(role Role) {
+	prevRole := r.role
 	r.role = role
+	if prevRole != role {
+		r.logger.Printf("Role changed: %s -> %s", prevRole.Repr(), role.Repr())
+	}
 }
 
-func (r *raftImpl) whoAmI() Role {
+func (r *Raft) whoAmI() Role {
 	return r.role
 }
 
-func (r *raftImpl) increaseTerm() {
-	r.term++
+func (r *Raft) increaseTerm() {
+	r.setTerm(r.term + 1)
 }
 
-func (r *raftImpl) Park() {
+func (r *Raft) setTerm(newTerm uint64) {
+	r.term = newTerm
+	r.logger.Printf("New term: %d", r.term)
+}
+
+func (r *Raft) Park() {
 	r.strand.Await()
 }
 
-func (r *raftImpl) resetTimer() {
-	r.electionTimer.Reset(timeout()) // Safe, because that timer is created by AfterFunc
+func (r *Raft) resetTimer() {
+	reset := func(ctx context.Context) {
+		r.electionTimer.Reset(timeout()) // Safe, because that timer is created by AfterFunc
+	}
+	r.strand.Combine(reset)
 }
 
 // Phase 1
 // RPC
-func RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
-
+func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error {
+	awaitReply := make(chan *RequestVoteReply)
+	do := func(ctx context.Context) {
+		if args.Term < r.term {
+			awaitReply <- &RequestVoteReply{
+				Granted: false,
+				Term:    r.term,
+			}
+			return
+		}
+		if r.votedFor == "" || r.votedFor == args.Candidate {
+			lastEntry := r.log.LastEntry()
+			if args.LastTerm >= lastEntry.Term {
+				awaitReply <- &RequestVoteReply{
+					Granted: true,
+					Term:    r.term,
+				}
+				r.votedFor = args.Candidate
+				return
+			}
+			if args.LastTerm == lastEntry.Term && args.LastIndex >= lastEntry.Index {
+				awaitReply <- &RequestVoteReply{
+					Granted: true,
+					Term:    r.term,
+				}
+				return
+			}
+		}
+		awaitReply <- &RequestVoteReply{
+			Granted: false,
+			Term:    r.term,
+		}
+	}
+	r.strand.Combine(do)
+	replyFromTask := <-awaitReply
+	reply.Granted = replyFromTask.Granted
+	reply.Term = replyFromTask.Term
+	return nil
 }
 
-func (r *raftImpl) goElection() {
-	do := func(ctx context.Context) {
-		r.logger.Println("Election started")
+func (r *Raft) goElection() {
+	replyChannel := make(chan *RequestVoteReply, r.neighboursNum)
+	requestVote := func(ctx context.Context) {
+		r.logger.Println("Election started!")
 		r.become(Candidate)
 		r.increaseTerm()
+		r.votedFor = ""
 		r.resetTimer()
-		replyChannel := make(chan *RequestVoteReply, len(r.neighbours))
-		lastEntry := r.log.At(persistence.LastEntry)
-
+		lastEntry := r.log.LastEntry()
 		for peer, peerClient := range r.neighbours {
-			if peerClient == nil { // Actually happens only at first election
-				r.goReconnect(peer)
-				continue
-			}
+			r.logger.Println(r.term)
 			args := &RequestVoteArgs{
 				Term:      r.term,
 				Candidate: r.me,
@@ -154,11 +203,11 @@ func (r *raftImpl) goElection() {
 				LastIndex: lastEntry.Index,
 			}
 			go func() {
-				reply := &RequestVoteReply{}
+				var reply RequestVoteReply
 				defer func() {
-					replyChannel <- reply
+					replyChannel <- &reply
 				}()
-				if err := peerClient.Call("raftImpl.RequestVote", args, reply); err != nil {
+				if err := peerClient.Call("Raft.RequestVote", args, &reply); err != nil {
 					r.logger.Printf("Could not call RequestVote on peer: [%s]. Error: [%s]. Requested reconnection", peer, err.Error())
 					r.goReconnect(peer)
 				} else {
@@ -166,34 +215,70 @@ func (r *raftImpl) goElection() {
 				}
 			}()
 		}
+	}
+	r.strand.Combine(requestVote)
 
-		votes := 0
-		for range len(r.neighbours) {
-			if reply := <-replyChannel; reply.Granted {
-				if reply.Term > r.term {
-					r.term = reply.Term
-				}
-				votes++
+	votes := 0
+	backoffTerm := uint64(0) // Highest term observed from rejecting nodes
+	for range r.neighboursNum {
+		reply := <-replyChannel
+		if reply.Granted {
+			votes++
+		} else {
+			if reply.Term > backoffTerm {
+				backoffTerm = reply.Term
 			}
 		}
+	}
 
-		if votes >= r.quorum() {
+	if votes >= r.quorum {
+		changeToLeader := func(ctx context.Context) {
+			if r.whoAmI() == Follower { // Someone took advantage on AppendEntries
+				return
+			}
 			r.become(Leader)
+			lastIndex := r.log.LastEntry().Index
 			for peer := range r.nextIndex {
-				r.nextIndex[peer] = lastEntry.Index + 1
+				r.nextIndex[peer] = lastIndex + 1
 				r.matchIndex[peer] = 0
 			}
 			r.goHeartbeat()
+		}
+		r.strand.Combine(changeToLeader)
+	} else {
+		backToFollower := func(ctx context.Context) {
+			r.become(Follower)
+			if backoffTerm > r.term {
+				r.setTerm(backoffTerm)
+			}
+		}
+		r.strand.Combine(backToFollower)
+	}
+}
+
+func (r *Raft) goReconnectBlocking(peer string) {
+	do := func(ctx context.Context) {
+		for {
+			client, err := rpc.DialHTTP("tcp", peer)
+			if err != nil {
+				r.logger.Printf("Could not reconnect to peer [%s].", peer)
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			r.logger.Printf("Peer: [%s] connected!", peer)
+			r.neighbours[peer] = client
+			return
 		}
 	}
 	r.strand.Combine(do)
 }
 
-func (r *raftImpl) goReconnect(peer string) {
+func (r *Raft) goReconnect(peer string) {
 	do := func(ctx context.Context) {
 		client, err := rpc.DialHTTP("tcp", peer)
 		if err != nil {
 			r.logger.Printf("Could not reconnect to peer [%s].", peer)
+			return
 		}
 		r.logger.Printf("Peer: [%s] connected!", peer)
 		r.neighbours[peer] = client
@@ -203,28 +288,27 @@ func (r *raftImpl) goReconnect(peer string) {
 
 // Phase 2
 // RPC
-func AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
-
+func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) error {
+	reply.Success = true
+	r.resetTimer()
+	return nil
 }
 
-func (r *raftImpl) goHeartbeat() {
+func (r *Raft) goHeartbeat() {
 	if r.whoAmI() != Leader {
 		return
 	}
+	r.resetTimer()
 	r.goAppendEntries([]machine.RSMcmd{}) // No entries
 	time.AfterFunc(heartbeatBase*time.Millisecond, func() {
 		r.goHeartbeat()
 	})
 }
 
-func (r *raftImpl) goAppendEntries(entries []machine.RSMcmd) {
+func (r *Raft) goAppendEntries(entries []machine.RSMcmd) {
 	do := func(ctx context.Context) {
 		replyChannel := make(chan *AppendEntriesReply, len(r.neighbours))
 		for peer, peerClient := range r.neighbours {
-			if peerClient == nil {
-				r.goReconnect(peer)
-				continue
-			}
 			go func() {
 				reply := &AppendEntriesReply{}
 				defer func() {
@@ -240,11 +324,14 @@ func (r *raftImpl) goAppendEntries(entries []machine.RSMcmd) {
 					LeaderCommit: r.commitIndex,
 				}
 				for {
-					if err := peerClient.Call("raftImpl.AppendEntries", args, reply); err != nil {
+					if err := peerClient.Call("Raft.AppendEntries", args, reply); err != nil {
 						r.logger.Printf("Could not call AppendEntries on peer: [%s]. Error: [%s]. Requested reconnection", peer, err.Error())
 						r.goReconnect(peer)
 						return
 					} else {
+						if reply.Success {
+							return
+						}
 						if reply.Term > r.term {
 							r.logger.Printf("RequestVoteReply from peer: [%s] failed. Observed higher peer term: [%d]", peer, reply.Term)
 							return // Observed another leader
@@ -259,7 +346,6 @@ func (r *raftImpl) goAppendEntries(entries []machine.RSMcmd) {
 						args.PrevIndex = reply.NextIndexHint
 						args.Entries = append(args.Entries, additionalEntries...)
 					}
-					return // Success
 				}
 			}()
 		}
@@ -274,7 +360,7 @@ func (r *raftImpl) goAppendEntries(entries []machine.RSMcmd) {
 				successCount++
 			}
 		}
-		if successCount >= r.quorum() {
+		if successCount >= r.quorum {
 			return
 		}
 	}
