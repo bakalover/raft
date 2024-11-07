@@ -15,7 +15,6 @@ type (
 	strandImpl struct {
 		q    *Queue
 		refs sync.WaitGroup
-		ctx  context.Context
 		c    atomic.Int64
 	}
 )
@@ -23,7 +22,6 @@ type (
 func NewStrand(ctx context.Context) Strand {
 	return &strandImpl{
 		q:   &Queue{},
-		ctx: ctx,
 	}
 }
 
@@ -52,7 +50,7 @@ func (s *strandImpl) runBlockingCPU(b Batch) int64 {
 	defer runtime.UnlockOSThread()
 	count := int64(0)
 	for b.IsNotEmpty() {
-		b.Pop().Run(s.ctx) // All tasks run under Strand context
+		b.Pop().Run() // All tasks run under Strand context
 		count++
 	}
 	return count

@@ -98,7 +98,7 @@ func (r *Raft) Run(ctx context.Context) {
 	// First election
 	// Timer is represented by rescheduling function that activates election process under Strand
 	// Reseting this timer is the same as election postpone
-	firstElection := func(ctx context.Context) {
+	firstElection := func() {
 		r.electionTimer = time.AfterFunc(timeout(), func() {
 			r.goElection()
 		})
@@ -137,7 +137,7 @@ func (r *Raft) Park() {
 }
 
 func (r *Raft) resetTimer() {
-	reset := func(ctx context.Context) {
+	reset := func() {
 		r.electionTimer.Reset(timeout()) // Safe, because that timer is created by AfterFunc
 	}
 	r.strand.Combine(reset)
@@ -147,7 +147,15 @@ func (r *Raft) resetTimer() {
 // RPC
 func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error {
 	awaitReply := make(chan *RequestVoteReply)
-	do := func(ctx context.Context) {
+	do := func() {
+		if args.Term > r.term {
+			r.setTerm(args.Term)
+			awaitReply <- &RequestVoteReply{
+				Granted: true,
+			}
+			r.become(Follower)
+			return
+		}
 		if args.Term < r.term {
 			awaitReply <- &RequestVoteReply{
 				Granted: false,
@@ -187,7 +195,7 @@ func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error 
 
 func (r *Raft) goElection() {
 	replyChannel := make(chan *RequestVoteReply, r.neighboursNum)
-	requestVote := func(ctx context.Context) {
+	requestVote := func() {
 		r.logger.Println("Election started!")
 		r.become(Candidate)
 		r.increaseTerm()
@@ -195,7 +203,6 @@ func (r *Raft) goElection() {
 		r.resetTimer()
 		lastEntry := r.log.LastEntry()
 		for peer, peerClient := range r.neighbours {
-			r.logger.Println(r.term)
 			args := &RequestVoteArgs{
 				Term:      r.term,
 				Candidate: r.me,
@@ -232,7 +239,7 @@ func (r *Raft) goElection() {
 	}
 
 	if votes >= r.quorum {
-		changeToLeader := func(ctx context.Context) {
+		changeToLeader := func() {
 			if r.whoAmI() == Follower { // Someone took advantage on AppendEntries
 				return
 			}
@@ -246,7 +253,7 @@ func (r *Raft) goElection() {
 		}
 		r.strand.Combine(changeToLeader)
 	} else {
-		backToFollower := func(ctx context.Context) {
+		backToFollower := func() {
 			r.become(Follower)
 			if backoffTerm > r.term {
 				r.setTerm(backoffTerm)
@@ -257,7 +264,7 @@ func (r *Raft) goElection() {
 }
 
 func (r *Raft) goReconnectBlocking(peer string) {
-	do := func(ctx context.Context) {
+	do := func() {
 		for {
 			client, err := rpc.DialHTTP("tcp", peer)
 			if err != nil {
@@ -274,7 +281,7 @@ func (r *Raft) goReconnectBlocking(peer string) {
 }
 
 func (r *Raft) goReconnect(peer string) {
-	do := func(ctx context.Context) {
+	do := func() {
 		client, err := rpc.DialHTTP("tcp", peer)
 		if err != nil {
 			r.logger.Printf("Could not reconnect to peer [%s].", peer)
@@ -306,7 +313,7 @@ func (r *Raft) goHeartbeat() {
 }
 
 func (r *Raft) goAppendEntries(entries []machine.RSMcmd) {
-	do := func(ctx context.Context) {
+	do := func() {
 		replyChannel := make(chan *AppendEntriesReply, len(r.neighbours))
 		for peer, peerClient := range r.neighbours {
 			go func() {
