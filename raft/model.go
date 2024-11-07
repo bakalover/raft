@@ -1,6 +1,10 @@
 package raft
 
-import "github.com/bakalover/raft/machine"
+import (
+	"fmt"
+
+	"github.com/bakalover/raft/machine"
+)
 
 type (
 	RaftReply struct {
@@ -16,8 +20,8 @@ type (
 	}
 
 	RequestVoteReply struct {
-		Granted bool   
-		Term    uint64 
+		Granted bool
+		Term    uint64
 	}
 
 	AppendEntriesArgs struct {
@@ -33,4 +37,12 @@ type (
 		Term          uint64
 		NextIndexHint uint64
 	}
+
+	RetryableError struct {
+		reason string
+	}
 )
+
+func (r RetryableError) Error() string {
+	return fmt.Sprintf("Retry me: [%s]", r.reason)
+}

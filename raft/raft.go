@@ -169,17 +169,34 @@ func (r *Raft) goReconnect(peer string) {
 }
 
 // RPC frontend
-func (r *Raft) Apply(args *machine.RSMcmd, reply *RaftReply) error {
+func (r *Raft) Apply(args machine.RSMcmd, reply *RaftReply) error {
+	replyChannel := make(chan *RaftReply)
 	do := func() {
 		switch r.whoAmI() {
-		case Follower:
-
+		case Follower: // Redirection to the leader
+			go func() {
+				var localReply RaftReply
+				if err := r.neighbours[r.leader].Call("Raft.Apply", args, &localReply); err != nil {
+					r.logger.Printf("Could not redirect request to [%s]. Error: [%s]", r.leader, err.Error())
+					replyChannel <- &RaftReply{
+						Error: err,
+					}
+				} else {
+					replyChannel <- &localReply
+				}
+			}()
 		case Candidate:
-
+			replyChannel <- &RaftReply{
+				Error: RetryableError{"wait election"},
+			}
 		case Leader:
+			// TODO
 		}
 	}
-
+	r.strand.Combine(do)
+	realReply := <-replyChannel
+	reply.Response = realReply.Response
+	reply.Error = realReply.Error
 	return nil
 }
 
