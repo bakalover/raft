@@ -6,7 +6,10 @@ Note: refactor wip
 
 ---
 
+### Design
+
 ### Features
+
 - No dependencies, just std lib
 - Frontend
   - Cluster -> RPC
@@ -17,19 +20,21 @@ Note: refactor wip
   - Leader redirection
 - Reconfiguration?
 - WIP...
+
 ---
 
 ### Testing & Metrics
-WIP...
----
+
+## WIP...
 
 ### How to run
 
 1. Step into balancer cmd directory
-2. `go run raft.go <node count>` 
+2. `go run raft.go <node count>`
    - [Why an odd number of cluster members?](https://etcd.io/docs/v3.3/faq/)
 3. Send request!
-  - WIP...
+
+- WIP...
 
 ### Reference
 
