@@ -11,7 +11,6 @@ import (
 func main() {
 	log.Println(os.Args)
 	config := raft.Config{
-		Ctx:        context.Background(),
 		LogKey:     os.Args[1],
 		Me:         os.Args[2],
 		Neighbours: os.Args[3:],

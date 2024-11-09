@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/bakalover/raft/machine"
+	"github.com/bakalover/raft/persistence"
 )
 
 type (
@@ -29,7 +30,7 @@ type (
 		Leader       string
 		PrevTerm     uint64
 		PrevIndex    uint64
-		Entries      []machine.RSMcmd
+		Entries      persistence.LogEntryPack
 		LeaderCommit uint64
 	}
 	AppendEntriesReply struct {

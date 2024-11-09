@@ -42,7 +42,6 @@ type (
 	}
 
 	Config struct {
-		Ctx        context.Context
 		LogKey     string
 		Me         string
 		Neighbours []string
@@ -52,7 +51,7 @@ type (
 func NewRaft(c *Config) *Raft {
 	fileLog := persistence.NewFileLog(c.LogKey)
 	raft := &Raft{
-		strand:        infra.NewStrand(c.Ctx),
+		strand:        infra.NewStrand(),
 		me:            c.Me,
 		neighbours:    make(map[string]*rpc.Client),
 		neighboursNum: len(c.Neighbours),
@@ -321,8 +320,30 @@ func (r *Raft) goElection() {
 // Phase 2
 // RPC
 func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) error {
-	reply.Success = true
+	reply.Term = r.term
+	if r.term > args.Term {
+		reply.Success = false
+		return nil
+	}
+	localPrevTerm := r.log.At(args.PrevIndex).Term
+	if localPrevTerm == 0 {
+		reply.Success = false
+		return nil
+	}
 	r.resetTimer()
+	r.leader = args.Leader
+	if localPrevTerm != args.PrevTerm {
+		r.log.TrimS(args.PrevIndex)
+	}
+	r.log.Append(args.Entries, args.PrevIndex+1)
+	if args.LeaderCommit > r.commitIndex && len(args.Entries) == 0 {
+		r.commitIndex = args.LeaderCommit
+		return nil
+	}
+	if args.LeaderCommit > r.commitIndex && len(args.Entries) != 0 {
+		r.commitIndex = min(args.LeaderCommit, args.Entries[len(args.Entries)-1].Index)
+		return nil
+	}
 	return nil
 }
 
@@ -331,13 +352,13 @@ func (r *Raft) goHeartbeat() {
 		return
 	}
 	r.resetTimer()
-	r.goAppendEntries([]machine.RSMcmd{}) // No entries
+	r.goAppendEntries(persistence.LogEntryPack{}) // No entries
 	time.AfterFunc(heartbeatBase*time.Millisecond, func() {
 		r.goHeartbeat()
 	})
 }
 
-func (r *Raft) goAppendEntries(entries []machine.RSMcmd) {
+func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
 	do := func() {
 		replyChannel := make(chan *AppendEntriesReply, len(r.neighbours))
 		for peer, peerClient := range r.neighbours {
@@ -370,9 +391,9 @@ func (r *Raft) goAppendEntries(entries []machine.RSMcmd) {
 						}
 						// AppendEntries fails because of log inconsistency
 						r.logger.Printf("RequestVoteReply from peer: [%s] failed. Observed peer's log inconsistency. NextIndexHint: [%d]", peer, reply.NextIndexHint)
-						var additionalEntries []machine.RSMcmd
+						var additionalEntries persistence.LogEntryPack
 						for index := reply.NextIndexHint; index < args.PrevIndex; index++ { // Batch grab optimization?
-							additionalEntries = append(additionalEntries, *r.log.At(index).RSMCmd)
+							additionalEntries = append(additionalEntries, r.log.At(index))
 						}
 						args.PrevTerm = r.log.Term(reply.NextIndexHint)
 						args.PrevIndex = reply.NextIndexHint

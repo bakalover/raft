@@ -1,7 +1,6 @@
 package infra
 
 import (
-	"context"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -19,7 +18,7 @@ type (
 	}
 )
 
-func NewStrand(ctx context.Context) Strand {
+func NewStrand() Strand {
 	return &strandImpl{
 		q:   &Queue{},
 	}
@@ -42,7 +41,6 @@ func (s *strandImpl) runBatch() {
 	if left > 0 {
 		s.goSelf()
 	}
-
 }
 
 func (s *strandImpl) runBlockingCPU(b Batch) int64 {
