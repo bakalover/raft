@@ -320,30 +320,46 @@ func (r *Raft) goElection() {
 // Phase 2
 // RPC
 func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) error {
-	reply.Term = r.term
-	if r.term > args.Term {
-		reply.Success = false
-		return nil
+	replyChannel := make(chan *AppendEntriesReply)
+	doAppend := func() {
+		replyToChannel := &AppendEntriesReply{}
+		defer func() {
+			replyChannel <- replyToChannel
+		}()
+		replyToChannel.Term = r.term
+		if r.term > args.Term {
+			replyToChannel.Success = false
+			return
+		} else if r.term < args.Term {
+			r.setTerm(args.Term)
+		}
+		localPrevTerm := r.log.At(args.PrevIndex).Term
+		if localPrevTerm == 0 { // Not Found
+			replyToChannel.Success = false
+			replyToChannel.NextIndexHint = r.log.LastEntry().Index + 1 // Lets help leader sent suitable start point
+			return
+		}
+		r.resetTimer()
+		r.leader = args.Leader
+		if localPrevTerm != args.PrevTerm {
+			r.log.TrimS(args.PrevIndex)
+		}
+		r.log.Append(args.Entries, args.PrevIndex+1)
+		if args.LeaderCommit > r.commitIndex && len(args.Entries) == 0 {
+			r.commitIndex = args.LeaderCommit
+			return
+		}
+		if args.LeaderCommit > r.commitIndex && len(args.Entries) != 0 {
+			r.commitIndex = min(args.LeaderCommit, args.Entries[len(args.Entries)-1].Index)
+			return
+		}
+		return
 	}
-	localPrevTerm := r.log.At(args.PrevIndex).Term
-	if localPrevTerm == 0 {
-		reply.Success = false
-		return nil
-	}
-	r.resetTimer()
-	r.leader = args.Leader
-	if localPrevTerm != args.PrevTerm {
-		r.log.TrimS(args.PrevIndex)
-	}
-	r.log.Append(args.Entries, args.PrevIndex+1)
-	if args.LeaderCommit > r.commitIndex && len(args.Entries) == 0 {
-		r.commitIndex = args.LeaderCommit
-		return nil
-	}
-	if args.LeaderCommit > r.commitIndex && len(args.Entries) != 0 {
-		r.commitIndex = min(args.LeaderCommit, args.Entries[len(args.Entries)-1].Index)
-		return nil
-	}
+	r.strand.Combine(doAppend)
+	replyFromChannel := <-replyChannel
+	reply.Success = replyFromChannel.Success
+	reply.Term = replyFromChannel.Term
+	reply.NextIndexHint = replyFromChannel.NextIndexHint
 	return nil
 }
 
@@ -395,8 +411,8 @@ func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
 						for index := reply.NextIndexHint; index < args.PrevIndex; index++ { // Batch grab optimization?
 							additionalEntries = append(additionalEntries, r.log.At(index))
 						}
-						args.PrevTerm = r.log.Term(reply.NextIndexHint)
-						args.PrevIndex = reply.NextIndexHint
+						args.PrevTerm = r.log.Term(reply.NextIndexHint - 1)
+						args.PrevIndex = reply.NextIndexHint - 1
 						args.Entries = append(args.Entries, additionalEntries...)
 					}
 				}
