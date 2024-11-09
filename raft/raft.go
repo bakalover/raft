@@ -334,17 +334,21 @@ func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) 
 			r.setTerm(args.Term)
 		}
 		localPrevTerm := r.log.At(args.PrevIndex).Term
-		if localPrevTerm == 0 { // Not Found
+		if localPrevTerm == 0 && args.PrevIndex != 0 { // Not Found
 			replyToChannel.Success = false
 			replyToChannel.NextIndexHint = r.log.LastEntry().Index + 1 // Lets help leader sent suitable start point
 			return
 		}
 		r.resetTimer()
-		r.leader = args.Leader
+		if r.leader != args.Leader {
+			r.leader = args.Leader
+			r.logger.Printf("New Leader: [%s]", r.leader)
+		}
 		if localPrevTerm != args.PrevTerm {
 			r.log.TrimS(args.PrevIndex)
 		}
 		r.log.Append(args.Entries, args.PrevIndex+1)
+		replyToChannel.Success = true
 		if args.LeaderCommit > r.commitIndex && len(args.Entries) == 0 {
 			r.commitIndex = args.LeaderCommit
 			return
@@ -368,22 +372,32 @@ func (r *Raft) goHeartbeat() {
 		return
 	}
 	r.resetTimer()
-	r.goAppendEntries(persistence.LogEntryPack{}) // No entries
+
+	awaitPrevious := make(chan struct{})
+	// No entries
+	// Launch in separate goroutine to prevent strand recursive submit deadlock
+	go func() {
+		defer func() {
+			awaitPrevious <- struct{}{}
+		}()
+		r.goAppendEntries(persistence.LogEntryPack{})
+	}()
 	time.AfterFunc(heartbeatBase*time.Millisecond, func() {
-		r.goHeartbeat()
+		<-awaitPrevious
+		r.strand.Combine(r.goHeartbeat)
 	})
 }
 
 func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
-	do := func() {
-		replyChannel := make(chan *AppendEntriesReply, len(r.neighbours))
+	replyChannel := make(chan *AppendEntriesReply, r.neighboursNum)
+	doRPC := func() {
 		for peer, peerClient := range r.neighbours {
 			go func() {
-				reply := &AppendEntriesReply{}
+				var replyToChannel AppendEntriesReply
 				defer func() {
-					replyChannel <- reply
+					replyChannel <- &replyToChannel
 				}()
-				prevIndex := r.nextIndex[peer]
+				prevIndex := r.nextIndex[peer] - 1
 				args := &AppendEntriesArgs{
 					Term:         r.term,
 					Leader:       r.me,
@@ -393,45 +407,52 @@ func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
 					LeaderCommit: r.commitIndex,
 				}
 				for {
-					if err := peerClient.Call("Raft.AppendEntries", args, reply); err != nil {
+					if err := peerClient.Call("Raft.AppendEntries", args, &replyToChannel); err != nil {
 						r.logger.Printf("Could not call AppendEntries on peer: [%s]. Error: [%s]. Requested reconnection", peer, err.Error())
 						r.goReconnect(peer)
 						return
 					} else {
-						if reply.Success {
+						if replyToChannel.Success {
 							return
 						}
-						if reply.Term > r.term {
-							r.logger.Printf("RequestVoteReply from peer: [%s] failed. Observed higher peer term: [%d]", peer, reply.Term)
-							return // Observed another leader
+						if replyToChannel.Term > r.term { // Observed another leader
+							r.logger.Printf("AppendEntries to peer: [%s] failed. Observed higher peer term: [%d]", peer, replyToChannel.Term)
+							return
 						}
 						// AppendEntries fails because of log inconsistency
-						r.logger.Printf("RequestVoteReply from peer: [%s] failed. Observed peer's log inconsistency. NextIndexHint: [%d]", peer, reply.NextIndexHint)
+						r.logger.Printf("AppendEntries to peer: [%s] failed. Observed peer's log inconsistency. NextIndexHint: [%d]", peer, replyToChannel.NextIndexHint)
 						var additionalEntries persistence.LogEntryPack
-						for index := reply.NextIndexHint; index < args.PrevIndex; index++ { // Batch grab optimization?
+						for index := replyToChannel.NextIndexHint; index <= prevIndex; index++ { // Batch grab optimization?
 							additionalEntries = append(additionalEntries, r.log.At(index))
 						}
-						args.PrevTerm = r.log.Term(reply.NextIndexHint - 1)
-						args.PrevIndex = reply.NextIndexHint - 1
+						args.PrevTerm = r.log.Term(replyToChannel.NextIndexHint - 1)
+						args.PrevIndex = replyToChannel.NextIndexHint - 1
 						args.Entries = append(args.Entries, additionalEntries...)
 					}
 				}
 			}()
 		}
+	}
+	r.strand.Combine(doRPC)
 
-		successCount := 0
-		for range len(r.neighbours) {
-			if reply := <-replyChannel; reply.Success {
-				if reply.Term > r.term {
-					r.term = reply.Term
-					r.become(Follower) // Heartbeats will stop
-				}
-				successCount++
-			}
-		}
-		if successCount >= r.quorum {
-			return
+	successCount := 0
+	backoffTerm := uint64(0) // Highest term observed from slaves (if they really are...)
+	for range r.neighboursNum {
+		replyFromChannel := <-replyChannel
+		if replyFromChannel.Success {
+			successCount++
+		} else if replyFromChannel.Term > backoffTerm {
+			backoffTerm = replyFromChannel.Term
 		}
 	}
-	r.strand.Combine(do)
+
+	if successCount >= r.quorum {
+		return
+	} else {
+		backToFollower := func() {
+			r.term = backoffTerm
+			r.become(Follower) // Heartbeats will stop
+		}
+		r.strand.Combine(backToFollower)
+	}
 }
