@@ -425,6 +425,7 @@ func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
 						for index := replyToChannel.NextIndexHint; index <= prevIndex; index++ { // Batch grab optimization?
 							additionalEntries = append(additionalEntries, r.log.At(index))
 						}
+						r.nextIndex[peer] = replyToChannel.NextIndexHint
 						args.PrevTerm = r.log.Term(replyToChannel.NextIndexHint - 1)
 						args.PrevIndex = replyToChannel.NextIndexHint - 1
 						args.Entries = append(args.Entries, additionalEntries...)
