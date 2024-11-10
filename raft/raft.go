@@ -372,7 +372,6 @@ func (r *Raft) goHeartbeat() {
 		return
 	}
 	r.resetTimer()
-
 	awaitPrevious := make(chan struct{})
 	// No entries
 	// Launch in separate goroutine to prevent strand recursive submit deadlock
@@ -389,13 +388,19 @@ func (r *Raft) goHeartbeat() {
 }
 
 func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
-	replyChannel := make(chan *AppendEntriesReply, r.neighboursNum)
+	replyChannel := make(chan struct {
+		Reply *AppendEntriesReply
+		Peer  string
+	}, r.neighboursNum)
 	doRPC := func() {
 		for peer, peerClient := range r.neighbours {
 			go func() {
 				var replyToChannel AppendEntriesReply
 				defer func() {
-					replyChannel <- &replyToChannel
+					replyChannel <- struct {
+						Reply *AppendEntriesReply
+						Peer  string
+					}{&replyToChannel, peer}
 				}()
 				prevIndex := r.nextIndex[peer] - 1
 				args := &AppendEntriesArgs{
@@ -425,7 +430,6 @@ func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
 						for index := replyToChannel.NextIndexHint; index <= prevIndex; index++ { // Batch grab optimization?
 							additionalEntries = append(additionalEntries, r.log.At(index))
 						}
-						r.nextIndex[peer] = replyToChannel.NextIndexHint
 						args.PrevTerm = r.log.Term(replyToChannel.NextIndexHint - 1)
 						args.PrevIndex = replyToChannel.NextIndexHint - 1
 						args.Entries = append(args.Entries, additionalEntries...)
@@ -438,16 +442,25 @@ func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
 
 	successCount := 0
 	backoffTerm := uint64(0) // Highest term observed from slaves (if they really are...)
+	newNextIndex := make(map[string]uint64)
 	for range r.neighboursNum {
 		replyFromChannel := <-replyChannel
-		if replyFromChannel.Success {
+		if replyFromChannel.Reply.Success {
 			successCount++
-		} else if replyFromChannel.Term > backoffTerm {
-			backoffTerm = replyFromChannel.Term
+			newNextIndex[replyFromChannel.Peer] = replyFromChannel.Reply.NextIndexHint
+		} else if replyFromChannel.Reply.Term > backoffTerm {
+			backoffTerm = replyFromChannel.Reply.Term
 		}
 	}
 
 	if successCount >= r.quorum {
+		updatePeerState := func() {
+			for peer, index := range newNextIndex {
+				r.nextIndex[peer] = index
+				r.matchIndex[peer] = index - 1
+			}
+		}
+		r.strand.Combine(updatePeerState)
 		return
 	} else {
 		backToFollower := func() {
