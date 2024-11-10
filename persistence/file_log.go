@@ -66,14 +66,20 @@ func (f *fileLog) gotoStart() {
 	f.gotoPos(0)
 }
 
+func (f *fileLog) gotoEnd() {
+	_, err := f.db.Seek(0, io.SeekEnd)
+	check(err)
+}
+
 func (f *fileLog) Append(es LogEntryPack, offset uint64) {
 	defer func() {
 		f.gotoStart()
 		f.persist()
 	}()
-	f.gotoLine(offset - 1)
+	f.gotoEnd()
 	bw := bufio.NewWriter(f.db)
-	for _, e := range es {
+	for i, e := range es {
+		e.Index = offset + uint64(i)
 		serialized, err := json.Marshal(e)
 		check(err)
 		_, err = bw.WriteString(string(serialized) + "\n")
@@ -87,31 +93,31 @@ func (f *fileLog) At(index uint64) *LogEntry {
 		f.gotoStart()
 	}()
 	br := bufio.NewScanner(f.db)
-	var l LogEntry
-	kLine := uint64(1)
+	l := &LogEntry{}
 	var bytes []byte
 	for br.Scan() {
 		bytes = br.Bytes()
-		if kLine == index {
-			break // Never yield if index == 0 aka Last Entry
+		check(json.Unmarshal(bytes, l)) // Optimize via file seek
+		if l.Index == index {
+			return l
 		}
-		kLine++
 	}
 	check(br.Err())
-	check(json.Unmarshal(bytes, &l))
-	return &l
+	if index == LastEntry {
+		return l
+	}
+	return &LogEntry{}
 }
 
 func (f *fileLog) Term(index uint64) uint64 {
 	return f.At(index).Term
 }
 
-func (f *fileLog) LastTerm() uint64 {
-	// Non-atomic, but ok
+func (f *fileLog) LastEntry() *LogEntry {
 	if size := f.Size(); size == 0 {
-		return 0
+		return &LogEntry{} // Zero index and term
 	}
-	return f.Term(LastEntry)
+	return f.At(LastEntry)
 }
 
 func (f *fileLog) Size() uint64 {
@@ -138,7 +144,16 @@ func (f *fileLog) TrimP(border uint64) {
 		f.persist()
 	}()
 	br := bufio.NewScanner(f.db)
-	f.gotoLine(border)
+	var l LogEntry
+	var bytes []byte
+	for br.Scan() {
+		bytes = br.Bytes()
+		check(json.Unmarshal(bytes, &l))
+		if l.Index == border {
+			break
+		}
+	}
+	check(br.Err())
 	// On crash during transfer Open() will retry with truncation
 	newLog := openFile(f.key + logFileTransferSuffix)
 	bw := bufio.NewWriter(newLog)

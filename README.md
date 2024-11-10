@@ -1,38 +1,42 @@
 # Raft
-🥱 Semi-toy implenetation of RAFT consensus protocol.
 
-*Just for fun*
+🥱 Toy RAFT consensus protocol implemetation, _Just for fun_ ♪
 
 Note: refactor wip
 
-___
-### Features
-Note: Depreprecated
-- Frontend - HTTP
-- Backend - intracluster RPC calls via gRPC
-- Fault tolerant load balancing using HAProxy
-- PostgreSQL as persistent storage (had big troubles with simple text files)
-
-___
-### Testing & Metrics
 ---
+
+### Design
+
+### Features
+
+- No dependencies, just std lib
+- Frontend
+  - Cluster -> RPC
+  - Balancer -> HTTP
+- Balancing Modes
+  - Round-Robin
+  - Random Choice
+  - Leader redirection
+- Reconfiguration?
+- WIP...
+
+---
+
+### Testing & Metrics
+
+## WIP...
+
 ### How to run
-Note: Depreprecated
-1) Set environmetal variables:
-- `PG_HOST`
-- `PG_USER`
-- `PG_PASS`
-- `PG_DB`
-- `PG_PORT`
-2) `go run main.go <id> <ids>` inside node/cmd directory. 
-    - `<id>` stands for current node id, so it should be unique. Ids stand for node number in whole cluster, this number should be equal in all node's setups.
-    - `<ids>` should be odd. Why? Consider case when we have just 2 nodes.
-    Each voted for another and both think it is a Leader (Pure brain split,
-    I've observed 2 nodes sending heartbeats and accepting it from each other).
-    We cannot make Quorum = 2 (because candidate is not set votedFor for itself).
-    Maybe force turning to Follower inside HeartBeat RPC? It might work, but unstable and I am not sure, because it can lead to extra election iterations.
-    This problem is the same for each even n.
-3) `curl  -L --post301 -i -d 'command=woopwoop' http://localhost:6070/replicate`
+
+1. Step into balancer cmd directory
+2. `go run raft.go <node count>`
+   - [Why an odd number of cluster members?](https://etcd.io/docs/v3.3/faq/)
+3. Send request!
+
+- WIP...
+
 ### Reference
+
 - [Raft](https://raft.github.io/raft.pdf)
 - [Eli Bendersky - Implementing Raft](https://eli.thegreenplace.net/2020/implementing-raft-part-0-introduction/)

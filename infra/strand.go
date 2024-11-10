@@ -1,7 +1,6 @@
 package infra
 
 import (
-	"context"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -15,16 +14,25 @@ type (
 	strandImpl struct {
 		q    *Queue
 		refs sync.WaitGroup
-		ctx  context.Context
 		c    atomic.Int64
 	}
 )
 
-func NewStrand(ctx context.Context) Strand {
+func NewStrand() Strand {
 	return &strandImpl{
-		q:   &Queue{},
-		ctx: ctx,
+		q: &Queue{},
 	}
+}
+
+func CombineAndGet[ResultType any](s Strand, f func(chan<- ResultType)) <-chan ResultType {
+	resultChannel := make(chan ResultType)
+	wrappedTask := func() {
+		defer func() {
+			f(resultChannel)
+		}()
+	}
+	s.Combine(wrappedTask)
+	return resultChannel
 }
 
 func (s *strandImpl) Combine(t Task) {
@@ -44,15 +52,14 @@ func (s *strandImpl) runBatch() {
 	if left > 0 {
 		s.goSelf()
 	}
-
 }
 
 func (s *strandImpl) runBlockingCPU(b Batch) int64 {
-	runtime.LockOSThread()
+	runtime.LockOSThread() // Turn off goroutine preemption to keep caches hot
 	defer runtime.UnlockOSThread()
 	count := int64(0)
 	for b.IsNotEmpty() {
-		b.Pop().Run(s.ctx) // All tasks run under Strand context
+		b.Pop().Run() // All tasks run under Strand context
 		count++
 	}
 	return count
