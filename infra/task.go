@@ -5,9 +5,9 @@ import (
 )
 
 type (
-	Task  = func()
-	Batch struct{ head *Node }
-	Node  struct {
+	Task          = func()
+	Batch         struct{ head *Node }
+	Node          struct {
 		t    Task
 		Next *Node
 	}

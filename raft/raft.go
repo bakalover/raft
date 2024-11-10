@@ -22,7 +22,7 @@ const (
 
 type (
 	Raft struct {
-		strand        infra.Strand // Synchronizes whole state below, except of one case inside Log
+		strand        infra.Strand // Synchronizes whole state below
 		me            string
 		neighbours    map[string]*rpc.Client
 		neighboursNum int
@@ -169,8 +169,7 @@ func (r *Raft) goReconnect(peer string) {
 
 // RPC frontend
 func (r *Raft) Apply(args machine.RSMcmd, reply *RaftReply) error {
-	replyChannel := make(chan *RaftReply)
-	do := func() {
+	doApply := func(replyChannel chan<- *RaftReply) {
 		switch r.whoAmI() {
 		case Follower: // Redirection to the leader
 			go func() {
@@ -192,8 +191,7 @@ func (r *Raft) Apply(args machine.RSMcmd, reply *RaftReply) error {
 			// TODO
 		}
 	}
-	r.strand.Combine(do)
-	realReply := <-replyChannel
+	realReply := <-infra.CombineAndGet(r.strand, doApply)
 	reply.Response = realReply.Response
 	reply.Error = realReply.Error
 	return nil
@@ -202,18 +200,17 @@ func (r *Raft) Apply(args machine.RSMcmd, reply *RaftReply) error {
 // Phase 1
 // RPC
 func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error {
-	awaitReply := make(chan *RequestVoteReply)
-	do := func() {
+	doRequestVote := func(replyChannel chan<- *RequestVoteReply) {
 		if args.Term > r.term {
 			r.setTerm(args.Term)
-			awaitReply <- &RequestVoteReply{
+			replyChannel <- &RequestVoteReply{
 				Granted: true,
 			}
 			r.become(Follower)
 			return
 		}
 		if args.Term < r.term {
-			awaitReply <- &RequestVoteReply{
+			replyChannel <- &RequestVoteReply{
 				Granted: false,
 				Term:    r.term,
 			}
@@ -222,34 +219,32 @@ func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error 
 		if r.votedFor == "" || r.votedFor == args.Candidate {
 			lastEntry := r.log.LastEntry()
 			if args.LastTerm >= lastEntry.Term {
-				awaitReply <- &RequestVoteReply{
+				replyChannel <- &RequestVoteReply{
 					Granted: true,
 				}
 				r.votedFor = args.Candidate
 				return
 			}
 			if args.LastTerm == lastEntry.Term && args.LastIndex >= lastEntry.Index {
-				awaitReply <- &RequestVoteReply{
+				replyChannel <- &RequestVoteReply{
 					Granted: true,
 				}
 				return
 			}
 		}
-		awaitReply <- &RequestVoteReply{
+		replyChannel <- &RequestVoteReply{
 			Granted: false,
 			Term:    r.term,
 		}
 	}
-	r.strand.Combine(do)
-	replyFromTask := <-awaitReply
+	replyFromTask := <-infra.CombineAndGet(r.strand, doRequestVote)
 	reply.Granted = replyFromTask.Granted
 	reply.Term = replyFromTask.Term
 	return nil
 }
 
 func (r *Raft) goElection() {
-	replyChannel := make(chan *RequestVoteReply, r.neighboursNum)
-	requestVote := func() {
+	doElectionRPC := func(replyChannel chan<- *RequestVoteReply) {
 		r.logger.Println("Election started!")
 		r.become(Candidate)
 		r.increaseTerm()
@@ -277,7 +272,8 @@ func (r *Raft) goElection() {
 			}()
 		}
 	}
-	r.strand.Combine(requestVote)
+
+	replyChannel := infra.CombineAndGet(r.strand, doElectionRPC)
 
 	votes := 0
 	backoffTerm := uint64(0) // Highest term observed from rejecting nodes
@@ -320,13 +316,13 @@ func (r *Raft) goElection() {
 // Phase 2
 // RPC
 func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) error {
-	replyChannel := make(chan *AppendEntriesReply)
-	doAppend := func() {
+	doAppendEntries := func(replyChannel chan<- *AppendEntriesReply) {
 		replyToChannel := &AppendEntriesReply{}
 		defer func() {
 			replyChannel <- replyToChannel
 		}()
 		replyToChannel.Term = r.term
+		replyToChannel.NextIndexHint = r.log.LastEntry().Index + 1 // Lets help leader sent suitable start point
 		if r.term > args.Term {
 			replyToChannel.Success = false
 			return
@@ -336,7 +332,6 @@ func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) 
 		localPrevTerm := r.log.At(args.PrevIndex).Term
 		if localPrevTerm == 0 && args.PrevIndex != 0 { // Not Found
 			replyToChannel.Success = false
-			replyToChannel.NextIndexHint = r.log.LastEntry().Index + 1 // Lets help leader sent suitable start point
 			return
 		}
 		r.resetTimer()
@@ -359,8 +354,7 @@ func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) 
 		}
 		return
 	}
-	r.strand.Combine(doAppend)
-	replyFromChannel := <-replyChannel
+	replyFromChannel := <-infra.CombineAndGet(r.strand, doAppendEntries)
 	reply.Success = replyFromChannel.Success
 	reply.Term = replyFromChannel.Term
 	reply.NextIndexHint = replyFromChannel.NextIndexHint
@@ -388,11 +382,10 @@ func (r *Raft) goHeartbeat() {
 }
 
 func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
-	replyChannel := make(chan struct {
+	doAppendEntriesRPC := func(replyChannel chan<- struct {
 		Reply *AppendEntriesReply
 		Peer  string
-	}, r.neighboursNum)
-	doRPC := func() {
+	}) {
 		for peer, peerClient := range r.neighbours {
 			go func() {
 				var replyToChannel AppendEntriesReply
@@ -402,11 +395,13 @@ func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
 						Peer  string
 					}{&replyToChannel, peer}
 				}()
+				r.logger.Println(r.nextIndex)
 				prevIndex := r.nextIndex[peer] - 1
+				prevTerm := <-infra.CombineAndGet(r.strand, func(replyChannel chan<- uint64) { replyChannel <- r.log.Term(prevIndex) })
 				args := &AppendEntriesArgs{
 					Term:         r.term,
 					Leader:       r.me,
-					PrevTerm:     r.log.Term(prevIndex),
+					PrevTerm:     prevTerm,
 					PrevIndex:    prevIndex,
 					Entries:      entries,
 					LeaderCommit: r.commitIndex,
@@ -424,13 +419,16 @@ func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
 							r.logger.Printf("AppendEntries to peer: [%s] failed. Observed higher peer term: [%d]", peer, replyToChannel.Term)
 							return
 						}
+						r.logger.Println(replyToChannel)
 						// AppendEntries fails because of log inconsistency
 						r.logger.Printf("AppendEntries to peer: [%s] failed. Observed peer's log inconsistency. NextIndexHint: [%d]", peer, replyToChannel.NextIndexHint)
 						var additionalEntries persistence.LogEntryPack
 						for index := replyToChannel.NextIndexHint; index <= prevIndex; index++ { // Batch grab optimization?
-							additionalEntries = append(additionalEntries, r.log.At(index))
+							entry := <-infra.CombineAndGet(r.strand, func(replyChannel chan<- *persistence.LogEntry) { replyChannel <- r.log.At(index) })
+							additionalEntries = append(additionalEntries, entry)
 						}
-						args.PrevTerm = r.log.Term(replyToChannel.NextIndexHint - 1)
+						newPrevTerm := <-infra.CombineAndGet(r.strand, func(replyChannel chan<- uint64) { replyChannel <- r.log.Term(replyToChannel.NextIndexHint - 1) })
+						args.PrevTerm = newPrevTerm
 						args.PrevIndex = replyToChannel.NextIndexHint - 1
 						args.Entries = append(args.Entries, additionalEntries...)
 					}
@@ -438,7 +436,8 @@ func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
 			}()
 		}
 	}
-	r.strand.Combine(doRPC)
+
+	replyChannel := infra.CombineAndGet(r.strand, doAppendEntriesRPC)
 
 	successCount := 0
 	backoffTerm := uint64(0) // Highest term observed from slaves (if they really are...)

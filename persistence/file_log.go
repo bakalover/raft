@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"os"
-	"sync"
 )
 
 var (
@@ -15,18 +14,12 @@ var (
 
 // Simple implementation of crash-tolerant append-only log using just one file
 type fileLog struct {
-	db *os.File
-	// Protection from concurrent access on append Entries
-	// Strand will not be able to protect log if there is inconsistency in some peer's log
-	// In that case appent entries will concurrenct retry with log access on additional entries
-	// For that we need mutex. It will be applied only on At()
-	// The rest of synchronization upon Strand
-	mu  *sync.Mutex
+	db  *os.File
 	key string
 }
 
 func NewFileLog(key string) Log {
-	return &fileLog{db: openFile(key + logFileSuffix), mu: new(sync.Mutex), key: key}
+	return &fileLog{db: openFile(key + logFileSuffix), key: key}
 }
 
 func (f *fileLog) Destroy() {
@@ -98,9 +91,7 @@ func (f *fileLog) Append(es LogEntryPack, offset uint64) {
 func (f *fileLog) At(index uint64) *LogEntry {
 	defer func() {
 		f.gotoStart()
-		f.mu.Unlock()
 	}()
-	f.mu.Lock()
 	br := bufio.NewScanner(f.db)
 	l := &LogEntry{}
 	var bytes []byte

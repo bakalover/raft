@@ -20,8 +20,19 @@ type (
 
 func NewStrand() Strand {
 	return &strandImpl{
-		q:   &Queue{},
+		q: &Queue{},
 	}
+}
+
+func CombineAndGet[ResultType any](s Strand, f func(chan<- ResultType)) <-chan ResultType {
+	resultChannel := make(chan ResultType)
+	wrappedTask := func() {
+		defer func() {
+			f(resultChannel)
+		}()
+	}
+	s.Combine(wrappedTask)
+	return resultChannel
 }
 
 func (s *strandImpl) Combine(t Task) {
