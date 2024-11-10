@@ -367,6 +367,7 @@ func (r *Raft) goHeartbeat() {
 	}
 	r.resetTimer()
 	awaitPrevious := make(chan struct{})
+	r.advanceCommitIndex()
 	// No entries
 	// Launch in separate goroutine to prevent strand recursive submit deadlock
 	go func() {
@@ -379,6 +380,30 @@ func (r *Raft) goHeartbeat() {
 		<-awaitPrevious
 		r.strand.Combine(r.goHeartbeat)
 	})
+}
+
+// Under strand context
+func (r *Raft) advanceCommitIndex() {
+	prev := r.commitIndex
+	N := r.commitIndex + 1
+	for {
+		peerAdvanceCount := 0
+		for _, index := range r.matchIndex {
+			if index >= N {
+				peerAdvanceCount++
+			}
+		}
+		if peerAdvanceCount >= r.quorum && r.log.Term(N) == r.term {
+			r.commitIndex = N
+		} else {
+			break
+		}
+	}
+	if prev != r.commitIndex {
+		r.logger.Printf("Advanced commitIndex: [%d] -> [%d]", prev, r.commitIndex)
+		// TODO: machine apply
+		// TODO: Atomic log compaction
+	}
 }
 
 func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
@@ -395,7 +420,6 @@ func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
 						Peer  string
 					}{&replyToChannel, peer}
 				}()
-				r.logger.Println(r.nextIndex)
 				prevIndex := r.nextIndex[peer] - 1
 				prevTerm := <-infra.CombineAndGet(r.strand, func(replyChannel chan<- uint64) { replyChannel <- r.log.Term(prevIndex) })
 				args := &AppendEntriesArgs{
