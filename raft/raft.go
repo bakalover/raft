@@ -1,7 +1,6 @@
 package raft
 
 import (
-	"context"
 	"log"
 	"math/rand"
 	"net/http"
@@ -22,23 +21,24 @@ const (
 
 type (
 	Raft struct {
-		strand        infra.Strand // Synchronizes whole state below
-		me            string
-		neighbours    map[string]*rpc.Client
-		neighboursNum int
-		electionTimer *time.Timer
-		role          Role
-		log           persistence.Log
-		stateMachine  machine.StateMachine
-		nextIndex     map[string]uint64
-		matchIndex    map[string]uint64
-		commitIndex   uint64
-		lastApplied   uint64
-		term          uint64
-		leader        string
-		votedFor      string
-		quorum        int
-		logger        *log.Logger
+		strand         infra.Strand // Synchronizes whole state below
+		me             string
+		neighbours     map[string]*rpc.Client
+		neighboursNum  int
+		electionTimer  *time.Timer
+		role           Role
+		log            persistence.Log
+		stateMachine   machine.StateMachine
+		nextIndex      map[string]uint64
+		matchIndex     map[string]uint64
+		commitIndex    uint64
+		lastApplied    uint64
+		term           uint64
+		leader         string
+		votedFor       string
+		quorum         int
+		logger         *log.Logger
+		clientResponse []chan *RaftReply
 	}
 
 	Config struct {
@@ -51,28 +51,30 @@ type (
 func NewRaft(c *Config) *Raft {
 	fileLog := persistence.NewFileLog(c.LogKey)
 	raft := &Raft{
-		strand:        infra.NewStrand(),
-		me:            c.Me,
-		neighbours:    make(map[string]*rpc.Client),
-		neighboursNum: len(c.Neighbours),
-		role:          Follower,
-		log:           fileLog,
-		term:          fileLog.LastEntry().Term, // No need in separate term in persistence??
-		stateMachine:  machine.NewStateMachine(),
-		nextIndex:     make(map[string]uint64),
-		matchIndex:    make(map[string]uint64),
-		quorum:        len(c.Neighbours)/2 + 1,
-		logger:        log.New(os.Stdout, "INFO: ", log.Lmicroseconds|log.Lshortfile),
+		strand:         infra.NewStrand(),
+		me:             c.Me,
+		neighbours:     make(map[string]*rpc.Client),
+		neighboursNum:  len(c.Neighbours),
+		role:           Follower,
+		log:            fileLog,
+		term:           fileLog.LastEntry().Term, // No need in separate term in persistence??
+		stateMachine:   machine.NewStateMachine(),
+		nextIndex:      make(map[string]uint64),
+		matchIndex:     make(map[string]uint64),
+		quorum:         len(c.Neighbours)/2 + 1,
+		logger:         log.New(os.Stdout, "INFO: ", log.Lmicroseconds|log.Lshortfile),
+		clientResponse: make([]chan *RaftReply, 0),
 	}
 	for _, n := range c.Neighbours {
+		// Just store keys in each map
 		raft.neighbours[n] = nil
-		raft.nextIndex[n] = 0  // Just store key
-		raft.matchIndex[n] = 0 // Just store key
+		raft.nextIndex[n] = 0
+		raft.matchIndex[n] = 0
 	}
 	return raft
 }
 
-func (r *Raft) Run(ctx context.Context) {
+func (r *Raft) Run() {
 	rpc.Register(r)
 	rpc.HandleHTTP()
 
@@ -86,15 +88,14 @@ func (r *Raft) Run(ctx context.Context) {
 	}()
 
 	for peer := range r.neighbours {
-		r.goReconnectBlocking(peer) // Init Connections
+		r.doReconnectBlocking(peer) // Init Connections
 	}
 
 	// First election
-	// Timer is represented by rescheduling function that activates election process under Strand
-	// Reseting this timer is the same as election postpone
+	// Timer is represented by rescheduling function
 	firstElection := func() {
 		r.electionTimer = time.AfterFunc(timeout(), func() {
-			r.goElection()
+			r.doElection()
 		})
 	}
 	r.strand.Combine(firstElection)
@@ -130,20 +131,20 @@ func (r *Raft) Park() {
 	r.strand.Await()
 }
 
-func (r *Raft) resetTimer() {
-	reset := func() {
-		r.electionTimer.Reset(timeout()) // Safe, because that timer is created by AfterFunc
+func (r *Raft) doResetTimer() {
+	do := func() {
+		r.electionTimer.Reset(timeout()) // Safe, because that timer was created by AfterFunc
 	}
-	r.strand.Combine(reset)
+	r.strand.Combine(do)
 }
 
-func (r *Raft) goReconnectBlocking(peer string) {
+func (r *Raft) doReconnectBlocking(peer string) {
 	do := func() {
 		for {
 			client, err := rpc.DialHTTP("tcp", peer)
 			if err != nil {
 				r.logger.Printf("Could not reconnect to peer [%s].", peer)
-				time.Sleep(1 * time.Second)
+				time.Sleep(time.Second)
 				continue
 			}
 			r.logger.Printf("Peer: [%s] connected!", peer)
@@ -154,7 +155,7 @@ func (r *Raft) goReconnectBlocking(peer string) {
 	r.strand.Combine(do)
 }
 
-func (r *Raft) goReconnect(peer string) {
+func (r *Raft) doReconnect(peer string) {
 	do := func() {
 		client, err := rpc.DialHTTP("tcp", peer)
 		if err != nil {
@@ -169,18 +170,20 @@ func (r *Raft) goReconnect(peer string) {
 
 // RPC frontend
 func (r *Raft) Apply(args machine.RSMcmd, reply *RaftReply) error {
-	doApply := func(replyChannel chan<- *RaftReply) {
+	do := func(replyChannel chan<- *RaftReply) {
 		switch r.whoAmI() {
 		case Follower: // Redirection to the leader
+			r.logger.Printf("I am not a leader. Redirecting to [%s]", r.leader)
 			go func() {
-				var localReply RaftReply
-				if err := r.neighbours[r.leader].Call("Raft.Apply", args, &localReply); err != nil {
+				var proxyReply RaftReply
+				defer func() {
+					replyChannel <- &proxyReply
+				}()
+				if err := r.neighbours[r.leader].Call("Raft.Apply", args, &proxyReply); err != nil {
 					r.logger.Printf("Could not redirect request to [%s]. Error: [%s]", r.leader, err.Error())
-					replyChannel <- &RaftReply{
+					proxyReply = RaftReply{
 						Error: err,
 					}
-				} else {
-					replyChannel <- &localReply
 				}
 			}()
 		case Candidate:
@@ -188,19 +191,41 @@ func (r *Raft) Apply(args machine.RSMcmd, reply *RaftReply) error {
 				Error: RetryableError{"wait election"},
 			}
 		case Leader:
-			// TODO
+			lastEntry := r.log.LastEntry()
+			index := lastEntry.Index + 1
+			term := r.term
+
+			ch := make(chan *RaftReply, 1)
+			r.clientResponse = append(r.clientResponse, ch)
+
+			// Now we should release Strand so Raft can proceed
+			// Client will await on doReply channel
+			// r.clientResponse[index] will recieve value when according commitIndex's majority advance
+			go func() {
+				pack := persistence.LogEntryPack{ // Batch time window optimization or another Strand!
+					{
+						Term:   term,
+						Index:  index,
+						RSMCmd: args,
+					},
+				}
+				r.log.Append(pack, index)
+				r.doAppendEntries(pack)
+
+				replyChannel <- <-ch
+			}()
 		}
 	}
-	realReply := <-infra.CombineAndGet(r.strand, doApply)
-	reply.Response = realReply.Response
-	reply.Error = realReply.Error
+	doReply := <-infra.CombineAndGet(r.strand, do)
+	reply.Response = doReply.Response
+	reply.Error = doReply.Error
 	return nil
 }
 
 // Phase 1
 // RPC
 func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error {
-	doRequestVote := func(replyChannel chan<- *RequestVoteReply) {
+	do := func(replyChannel chan<- *RequestVoteReply) {
 		if args.Term > r.term {
 			r.setTerm(args.Term)
 			replyChannel <- &RequestVoteReply{
@@ -237,22 +262,22 @@ func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error 
 			Term:    r.term,
 		}
 	}
-	replyFromTask := <-infra.CombineAndGet(r.strand, doRequestVote)
-	reply.Granted = replyFromTask.Granted
-	reply.Term = replyFromTask.Term
+	doReply := <-infra.CombineAndGet(r.strand, do)
+	reply.Granted = doReply.Granted
+	reply.Term = doReply.Term
 	return nil
 }
 
-func (r *Raft) goElection() {
-	doElectionRPC := func(replyChannel chan<- *RequestVoteReply) {
+func (r *Raft) doElection() {
+	do := func(replyChannel chan<- *RequestVoteReply) {
 		r.logger.Println("Election started!")
 		r.become(Candidate)
 		r.increaseTerm()
 		r.votedFor = ""
-		r.resetTimer()
+		r.doResetTimer()
 		lastEntry := r.log.LastEntry()
 		for peer, peerClient := range r.neighbours {
-			args := &RequestVoteArgs{
+			args := RequestVoteArgs{
 				Term:      r.term,
 				Candidate: r.me,
 				LastTerm:  lastEntry.Term,
@@ -265,7 +290,7 @@ func (r *Raft) goElection() {
 				}()
 				if err := peerClient.Call("Raft.RequestVote", args, &reply); err != nil {
 					r.logger.Printf("Could not call RequestVote on peer: [%s]. Error: [%s]. Requested reconnection", peer, err.Error())
-					r.goReconnect(peer)
+					r.doReconnect(peer)
 				} else {
 					r.logger.Printf("RequestVoteReply from peer: [%s]. Granted: [%t]", peer, reply.Granted)
 				}
@@ -273,7 +298,7 @@ func (r *Raft) goElection() {
 		}
 	}
 
-	replyChannel := infra.CombineAndGet(r.strand, doElectionRPC)
+	replyChannel := infra.CombineAndGet(r.strand, do)
 
 	votes := 0
 	backoffTerm := uint64(0) // Highest term observed from rejecting nodes
@@ -299,7 +324,7 @@ func (r *Raft) goElection() {
 				r.nextIndex[peer] = lastIndex + 1
 				r.matchIndex[peer] = 0
 			}
-			r.goHeartbeat()
+			r.doHeartbeat()
 		}
 		r.strand.Combine(changeToLeader)
 	} else {
@@ -316,35 +341,46 @@ func (r *Raft) goElection() {
 // Phase 2
 // RPC
 func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) error {
-	doAppendEntries := func(replyChannel chan<- *AppendEntriesReply) {
-		replyToChannel := &AppendEntriesReply{}
+	r.logger.Printf("Args Recv: [%+v]", args)
+	do := func(replyChannel chan<- *AppendEntriesReply) {
+		replyToChannel := new(AppendEntriesReply)
 		defer func() {
 			replyChannel <- replyToChannel
 		}()
 		replyToChannel.Term = r.term
-		replyToChannel.NextIndexHint = r.log.LastEntry().Index + 1 // Lets help leader sent suitable start point
 		if r.term > args.Term {
+			replyToChannel.NextIndexHint = r.log.LastEntry().Index + 1 // Lets help leader and send back suitable start point
 			replyToChannel.Success = false
 			return
 		} else if r.term < args.Term {
 			r.setTerm(args.Term)
 		}
 		localPrevTerm := r.log.At(args.PrevIndex).Term
-		if localPrevTerm == 0 && args.PrevIndex != 0 { // Not Found
+		if localPrevTerm == 0 && r.log.Size() != 0 && args.PrevIndex != 0 { // Not Found
 			replyToChannel.Success = false
 			return
 		}
-		r.resetTimer()
+		r.doResetTimer()
 		if r.leader != args.Leader {
 			r.leader = args.Leader
 			r.logger.Printf("New Leader: [%s]", r.leader)
 		}
-		if localPrevTerm != args.PrevTerm {
+		if r.log.Size() == 0 && args.PrevIndex != 0 {
+			replyToChannel.Success = false
+			replyToChannel.NextIndexHint = 1
+			return
+		}
+		if localPrevTerm != args.PrevTerm && args.PrevIndex != 0 {
 			r.log.TrimS(args.PrevIndex)
 		}
+		r.logger.Println("APPEND")
 		r.log.Append(args.Entries, args.PrevIndex+1)
 		replyToChannel.Success = true
+		replyToChannel.NextIndexHint = r.log.LastEntry().Index + 1 // Renew hint
 		if args.LeaderCommit > r.commitIndex && len(args.Entries) == 0 {
+			for i := r.commitIndex + 1; i <= args.LeaderCommit; i++ {
+				r.applyToStateMachine(i) // safe
+			}
 			r.commitIndex = args.LeaderCommit
 			return
 		}
@@ -354,36 +390,61 @@ func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) 
 		}
 		return
 	}
-	replyFromChannel := <-infra.CombineAndGet(r.strand, doAppendEntries)
-	reply.Success = replyFromChannel.Success
-	reply.Term = replyFromChannel.Term
-	reply.NextIndexHint = replyFromChannel.NextIndexHint
+	doReply := <-infra.CombineAndGet(r.strand, do)
+	reply.Success = doReply.Success
+	reply.Term = doReply.Term
+	reply.NextIndexHint = doReply.NextIndexHint
 	return nil
 }
 
-func (r *Raft) goHeartbeat() {
+// Under strand context
+func (r *Raft) doHeartbeat() {
 	if r.whoAmI() != Leader {
 		return
 	}
-	r.resetTimer()
+	r.doResetTimer()
 	awaitPrevious := make(chan struct{})
-	r.advanceCommitIndex()
+
+	for i := r.advanceCommitIndex() + 1; i <= r.commitIndex; i++ {
+		result := r.applyToStateMachine(i)
+		r.respondClient(result) // Raft's commit succeed
+	}
+
 	// No entries
 	// Launch in separate goroutine to prevent strand recursive submit deadlock
 	go func() {
-		defer func() {
-			awaitPrevious <- struct{}{}
-		}()
-		r.goAppendEntries(persistence.LogEntryPack{})
+		defer close(awaitPrevious)
+		r.doAppendEntries(persistence.EmptyPack())
 	}()
+
 	time.AfterFunc(heartbeatBase*time.Millisecond, func() {
 		<-awaitPrevious
-		r.strand.Combine(r.goHeartbeat)
+		r.strand.Combine(r.doHeartbeat)
 	})
 }
 
 // Under strand context
-func (r *Raft) advanceCommitIndex() {
+func (r *Raft) applyToStateMachine(index uint64) (result machine.MachineType) {
+	entry := r.log.At(index) // Should be safe, beacause index is commited
+	result = r.stateMachine.Apply(entry.RSMCmd)
+	r.logger.Printf("New state machine value: [%d]", result)
+	return result
+}
+
+// Under strand context
+func (r *Raft) respondClient(response machine.MachineType) {
+	var responseChannel chan *RaftReply
+	if len(r.clientResponse) == 0 { // Rewind wait -> need to fix =( + snapshots
+		return
+	}
+	responseChannel, r.clientResponse = r.clientResponse[0], r.clientResponse[1:] // Pop first client
+	responseChannel <- &RaftReply{
+		Response: response,
+	}
+}
+
+// Under strand context
+func (r *Raft) advanceCommitIndex() (prevCommitIndex uint64) {
 	prev := r.commitIndex
 	N := r.commitIndex + 1
 	for {
@@ -393,21 +454,27 @@ func (r *Raft) advanceCommitIndex() {
 				peerAdvanceCount++
 			}
 		}
-		if peerAdvanceCount >= r.quorum && r.log.Term(N) == r.term {
-			r.commitIndex = N
-		} else {
+
+		// If there exists an N such that N > commitIndex, a majority
+		// of matchIndex[i] ≥ N, and log[N].term == currentTerm
+		// Note: all previos commited entries must gather quorum up to last commited one
+		if peerAdvanceCount < r.quorum {
 			break
+		} else {
+			if r.log.Term(N) == r.term {
+				r.commitIndex = N
+			}
 		}
+		N++
 	}
 	if prev != r.commitIndex {
 		r.logger.Printf("Advanced commitIndex: [%d] -> [%d]", prev, r.commitIndex)
-		// TODO: machine apply
-		// TODO: Atomic log compaction
 	}
+	return prev
 }
 
-func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
-	doAppendEntriesRPC := func(replyChannel chan<- struct {
+func (r *Raft) doAppendEntries(entries persistence.LogEntryPack) {
+	do := func(replyChannel chan<- struct {
 		Reply *AppendEntriesReply
 		Peer  string
 	}) {
@@ -422,7 +489,10 @@ func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
 				}()
 				prevIndex := r.nextIndex[peer] - 1
 				prevTerm := <-infra.CombineAndGet(r.strand, func(replyChannel chan<- uint64) { replyChannel <- r.log.Term(prevIndex) })
-				args := &AppendEntriesArgs{
+				if prevIndex == 0 {
+					prevTerm = 0
+				}
+				args := AppendEntriesArgs{
 					Term:         r.term,
 					Leader:       r.me,
 					PrevTerm:     prevTerm,
@@ -433,7 +503,7 @@ func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
 				for {
 					if err := peerClient.Call("Raft.AppendEntries", args, &replyToChannel); err != nil {
 						r.logger.Printf("Could not call AppendEntries on peer: [%s]. Error: [%s]. Requested reconnection", peer, err.Error())
-						r.goReconnect(peer)
+						r.doReconnect(peer)
 						return
 					} else {
 						if replyToChannel.Success {
@@ -449,7 +519,7 @@ func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
 						var additionalEntries persistence.LogEntryPack
 						for index := replyToChannel.NextIndexHint; index <= prevIndex; index++ { // Batch grab optimization?
 							entry := <-infra.CombineAndGet(r.strand, func(replyChannel chan<- *persistence.LogEntry) { replyChannel <- r.log.At(index) })
-							additionalEntries = append(additionalEntries, entry)
+							additionalEntries = append(additionalEntries, *entry)
 						}
 						newPrevTerm := <-infra.CombineAndGet(r.strand, func(replyChannel chan<- uint64) { replyChannel <- r.log.Term(replyToChannel.NextIndexHint - 1) })
 						args.PrevTerm = newPrevTerm
@@ -461,21 +531,20 @@ func (r *Raft) goAppendEntries(entries persistence.LogEntryPack) {
 		}
 	}
 
-	replyChannel := infra.CombineAndGet(r.strand, doAppendEntriesRPC)
+	replyChannel := infra.CombineAndGet(r.strand, do)
 
 	successCount := 0
 	backoffTerm := uint64(0) // Highest term observed from slaves (if they really are...)
 	newNextIndex := make(map[string]uint64)
 	for range r.neighboursNum {
-		replyFromChannel := <-replyChannel
-		if replyFromChannel.Reply.Success {
+		doReply := <-replyChannel
+		if doReply.Reply.Success {
 			successCount++
-			newNextIndex[replyFromChannel.Peer] = replyFromChannel.Reply.NextIndexHint
-		} else if replyFromChannel.Reply.Term > backoffTerm {
-			backoffTerm = replyFromChannel.Reply.Term
+			newNextIndex[doReply.Peer] = doReply.Reply.NextIndexHint
+		} else if doReply.Reply.Term > backoffTerm {
+			backoffTerm = doReply.Reply.Term
 		}
 	}
-
 	if successCount >= r.quorum {
 		updatePeerState := func() {
 			for peer, index := range newNextIndex {

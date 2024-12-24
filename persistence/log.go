@@ -8,12 +8,12 @@ const (
 
 type (
 	LogEntry struct {
-		Term   uint64          `json:"term"`
-		Index  uint64          `json:"index"` // Index is virtual (because of possible compaction)
-		RSMCmd *machine.RSMcmd `json:"rsm"`
+		Term   uint64         `json:"term"`
+		Index  uint64         `json:"index"` // Index is virtual (because of possible compaction)
+		RSMCmd machine.RSMcmd `json:"rsm"`
 	}
 
-	LogEntryPack = []*LogEntry
+	LogEntryPack = []LogEntry
 
 	// Append-only log with compaction abillity
 	// There is no errors in interface, caller should provide correct call semantic
@@ -41,3 +41,7 @@ type (
 		Destroy()
 	}
 )
+
+func EmptyPack() LogEntryPack {
+	return LogEntryPack{}
+}

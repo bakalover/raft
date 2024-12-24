@@ -17,15 +17,11 @@ func NewStateMachine() StateMachine {
 func (m *machineImpl) Apply(cmd RSMcmd) MachineType {
 	switch cmd.CMD {
 	case CAS:
-		ret := m.state
 		m.state = cmd.Arg
-		return ret
 	case Add:
 		m.state += cmd.Arg
 	case Mul:
 		m.state *= cmd.Arg
-	case Get:
-		return m.state
 	}
-	return 0
+	return m.state
 }

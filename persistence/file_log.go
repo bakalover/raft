@@ -4,12 +4,13 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
+	"log"
 	"os"
 )
 
 var (
-	logFileSuffix         = "_log"
-	logFileTransferSuffix = "_log.swap"
+	logFileSuffix         = "_log.txt"
+	logFileTransferSuffix = "_log.swap.txt"
 )
 
 // Simple implementation of crash-tolerant append-only log using just one file
@@ -72,6 +73,8 @@ func (f *fileLog) gotoEnd() {
 }
 
 func (f *fileLog) Append(es LogEntryPack, offset uint64) {
+	log.Println("PAM AP")
+
 	defer func() {
 		f.gotoStart()
 		f.persist()
@@ -89,6 +92,8 @@ func (f *fileLog) Append(es LogEntryPack, offset uint64) {
 }
 
 func (f *fileLog) At(index uint64) *LogEntry {
+	log.Println("PAM At")
+
 	defer func() {
 		f.gotoStart()
 	}()
@@ -110,10 +115,13 @@ func (f *fileLog) At(index uint64) *LogEntry {
 }
 
 func (f *fileLog) Term(index uint64) uint64 {
+	log.Println("PAM T")
+
 	return f.At(index).Term
 }
 
 func (f *fileLog) LastEntry() *LogEntry {
+	log.Println("PAM LE")
 	if size := f.Size(); size == 0 {
 		return &LogEntry{} // Zero index and term
 	}
@@ -121,6 +129,7 @@ func (f *fileLog) LastEntry() *LogEntry {
 }
 
 func (f *fileLog) Size() uint64 {
+	log.Println("PAM S")
 	defer func() {
 		f.gotoStart()
 	}()
@@ -139,6 +148,8 @@ func (f *fileLog) Size() uint64 {
 // First we will create new file, then fill it with values, and at the end - atomically swap log files
 // So this operation works like CAS on your file system
 func (f *fileLog) TrimP(border uint64) {
+	log.Println("PAM TP")
+
 	defer func() {
 		f.gotoStart()
 		f.persist()
@@ -172,6 +183,8 @@ func (f *fileLog) TrimP(border uint64) {
 }
 
 func (f *fileLog) TrimS(border uint64) {
+	log.Println("PAM TS")
+
 	defer func() {
 		f.gotoStart()
 	}()

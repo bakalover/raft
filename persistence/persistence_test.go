@@ -13,10 +13,10 @@ func TestFileLog(t *testing.T) {
 		log := persistence.NewFileLog("./test")
 		defer log.Destroy()
 		assert.Zero(t, log.Size())
-		log.Append([]*persistence.LogEntry{
+		log.Append([]persistence.LogEntry{
 			{
 				Term: 69,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "1",
@@ -36,10 +36,10 @@ func TestFileLog(t *testing.T) {
 		log := persistence.NewFileLog("./test")
 		defer log.Destroy()
 		assert.Zero(t, log.Size())
-		log.Append([]*persistence.LogEntry{
+		log.Append([]persistence.LogEntry{
 			{
 				Term: 111,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "1",
@@ -49,7 +49,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 222,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "2",
@@ -58,10 +58,10 @@ func TestFileLog(t *testing.T) {
 				},
 			},
 		}, 1)
-		log.Append([]*persistence.LogEntry{
+		log.Append([]persistence.LogEntry{
 			{
 				Term: 333,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "1",
@@ -71,7 +71,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 444,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "2",
@@ -110,10 +110,10 @@ func TestFileLog(t *testing.T) {
 	t.Run("TrimP", func(t *testing.T) {
 		log := persistence.NewFileLog("./test")
 		// defer log.Destroy()
-		log.Append([]*persistence.LogEntry{
+		log.Append([]persistence.LogEntry{
 			{
 				Term: 111,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "1",
@@ -123,7 +123,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 222,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "2",
@@ -133,7 +133,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 333,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "1",
@@ -143,7 +143,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 444,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "2",
@@ -167,10 +167,10 @@ func TestFileLog(t *testing.T) {
 	t.Run("TrimP Append TrimP", func(t *testing.T) {
 		log := persistence.NewFileLog("./test")
 		defer log.Destroy()
-		log.Append([]*persistence.LogEntry{
+		log.Append([]persistence.LogEntry{
 			{
 				Term: 111,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "1",
@@ -180,7 +180,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 222,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "2",
@@ -190,10 +190,10 @@ func TestFileLog(t *testing.T) {
 			},
 		}, 1)
 		log.TrimP(1)
-		log.Append([]*persistence.LogEntry{
+		log.Append([]persistence.LogEntry{
 			{
 				Term: 333,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "1",
@@ -203,7 +203,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 444,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "2",
@@ -227,10 +227,10 @@ func TestFileLog(t *testing.T) {
 	t.Run("TrimP x2", func(t *testing.T) {
 		log := persistence.NewFileLog("./test")
 		defer log.Destroy()
-		log.Append([]*persistence.LogEntry{
+		log.Append([]persistence.LogEntry{
 			{
 				Term: 111,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "1",
@@ -240,7 +240,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 222,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "2",
@@ -250,7 +250,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 333,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "1",
@@ -260,7 +260,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 444,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "2",
@@ -285,10 +285,10 @@ func TestFileLog(t *testing.T) {
 	t.Run("TrimP All", func(t *testing.T) {
 		log := persistence.NewFileLog("./test")
 		defer log.Destroy()
-		log.Append([]*persistence.LogEntry{
+		log.Append([]persistence.LogEntry{
 			{
 				Term: 111,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "1",
@@ -298,7 +298,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 222,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "2",
@@ -308,7 +308,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 333,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "1",
@@ -318,7 +318,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 444,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "2",
@@ -335,10 +335,10 @@ func TestFileLog(t *testing.T) {
 	t.Run("TrimS", func(t *testing.T) {
 		log := persistence.NewFileLog("./test")
 		defer log.Destroy()
-		log.Append([]*persistence.LogEntry{
+		log.Append([]persistence.LogEntry{
 			{
 				Term: 111,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "1",
@@ -348,7 +348,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 222,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "2",
@@ -369,10 +369,10 @@ func TestFileLog(t *testing.T) {
 	t.Run("TrimS x2", func(t *testing.T) {
 		log := persistence.NewFileLog("./test")
 		defer log.Destroy()
-		log.Append([]*persistence.LogEntry{
+		log.Append([]persistence.LogEntry{
 			{
 				Term: 111,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "1",
@@ -382,7 +382,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 222,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "2",
@@ -392,7 +392,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 333,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "2",
@@ -413,10 +413,10 @@ func TestFileLog(t *testing.T) {
 	t.Run("TrimS All", func(t *testing.T) {
 		log := persistence.NewFileLog("./test")
 		defer log.Destroy()
-		log.Append([]*persistence.LogEntry{
+		log.Append([]persistence.LogEntry{
 			{
 				Term: 111,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "1",
@@ -426,7 +426,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 222,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "2",
@@ -436,7 +436,7 @@ func TestFileLog(t *testing.T) {
 			},
 			{
 				Term: 333,
-				RSMCmd: &machine.RSMcmd{
+				RSMCmd: machine.RSMcmd{
 					CMD: machine.Add,
 					Xid: machine.Xid{
 						Client: "2",
@@ -462,9 +462,9 @@ func TestFileLog(t *testing.T) {
 func BenchmarkAppend(t *testing.B) {
 	log := persistence.NewFileLog("./test")
 	defer log.Destroy()
-	e := &persistence.LogEntry{
+	e := persistence.LogEntry{
 		Term: 111,
-		RSMCmd: &machine.RSMcmd{
+		RSMCmd: machine.RSMcmd{
 			CMD: machine.Add,
 			Xid: machine.Xid{
 				Client: "1",
@@ -474,16 +474,16 @@ func BenchmarkAppend(t *testing.B) {
 	}
 
 	for i := 0; i < t.N; i++ {
-		log.Append([]*persistence.LogEntry{e}, uint64(i+1))
+		log.Append([]persistence.LogEntry{e}, uint64(i+1))
 	}
 }
 
 func BenchmarkAppendTrimP(b *testing.B) {
 	log := persistence.NewFileLog("./test")
 	defer log.Destroy()
-	e := &persistence.LogEntry{
+	e := persistence.LogEntry{
 		Term: 111,
-		RSMCmd: &machine.RSMcmd{
+		RSMCmd: machine.RSMcmd{
 			CMD: machine.Add,
 			Xid: machine.Xid{
 				Client: "1",
@@ -493,7 +493,7 @@ func BenchmarkAppendTrimP(b *testing.B) {
 	}
 
 	for i := 0; i < b.N; i++ {
-		log.Append([]*persistence.LogEntry{e}, uint64(i+1))
+		log.Append([]persistence.LogEntry{e}, uint64(i+1))
 		log.TrimP(uint64(b.N + 1))
 	}
 }
@@ -501,9 +501,9 @@ func BenchmarkAppendTrimP(b *testing.B) {
 func BenchmarkAppendTrimS(b *testing.B) {
 	log := persistence.NewFileLog("./test")
 	defer log.Destroy()
-	e := &persistence.LogEntry{
+	e := persistence.LogEntry{
 		Term: 111,
-		RSMCmd: &machine.RSMcmd{
+		RSMCmd: machine.RSMcmd{
 			CMD: machine.Add,
 			Xid: machine.Xid{
 				Client: "1",
@@ -513,7 +513,7 @@ func BenchmarkAppendTrimS(b *testing.B) {
 	}
 
 	for i := 0; i < b.N; i++ {
-		log.Append([]*persistence.LogEntry{e}, uint64(i+1))
+		log.Append([]persistence.LogEntry{e}, uint64(i+1))
 		log.TrimS(uint64(1))
 	}
 }
@@ -521,9 +521,9 @@ func BenchmarkAppendTrimS(b *testing.B) {
 func BenchmarkAppendAccess(b *testing.B) {
 	log := persistence.NewFileLog("./test")
 	defer log.Destroy()
-	e := &persistence.LogEntry{
+	e := persistence.LogEntry{
 		Term: 111,
-		RSMCmd: &machine.RSMcmd{
+		RSMCmd: machine.RSMcmd{
 			CMD: machine.Add,
 			Xid: machine.Xid{
 				Client: "1",
@@ -533,7 +533,7 @@ func BenchmarkAppendAccess(b *testing.B) {
 	}
 
 	for i := 0; i < b.N; i++ {
-		log.Append([]*persistence.LogEntry{e}, uint64(i+1))
+		log.Append([]persistence.LogEntry{e}, uint64(i+1))
 	}
 	for i := 0; i < b.N; i++ {
 		log.At(uint64(i + 1))

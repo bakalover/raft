@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"log"
 	"os"
 
@@ -15,5 +14,7 @@ func main() {
 		Me:         os.Args[2],
 		Neighbours: os.Args[3:],
 	}
-	raft.NewRaft(&config).Run(context.Background())
+	instance := raft.NewRaft(&config)
+	instance.Run()
+	// instance.Park()
 }

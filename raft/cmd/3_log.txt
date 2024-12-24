@@ -1,0 +1,2 @@
+{"term":1,"index":1,"rsm":{"cmd":3,"xid":{"client":"hiii","index":1},"arg":0}}
+{"term":2,"index":2,"rsm":{"cmd":3,"xid":{"client":"hiii","index":1},"arg":0}}
