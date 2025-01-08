@@ -1,12 +1,11 @@
 package infra
 
 import (
-	"context"
 	"sync/atomic"
 )
 
 type (
-	Task  = func(ctx context.Context)
+	Task  = func()
 	Batch struct{ head *Node }
 	Node  struct {
 		t    Task
@@ -22,8 +21,8 @@ func FormNode(t Task, next *Node) *Node {
 	return &Node{t, next}
 }
 
-func (n *Node) Run(ctx context.Context) {
-	n.t(ctx)
+func (n *Node) Run() {
+	n.t()
 }
 
 func (b *Batch) IsNotEmpty() bool {

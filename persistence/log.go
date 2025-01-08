@@ -1,8 +1,6 @@
 package persistence
 
-import (
-	"github.com/bakalover/raft/rsm"
-)
+import "github.com/bakalover/raft/machine"
 
 const (
 	LastEntry = uint64(0) // First entry has index == 1
@@ -10,11 +8,12 @@ const (
 
 type (
 	LogEntry struct {
-		Term   uint64      `json:"term"`
-		RSMCmd *rsm.RSMCmd `json:"rsm"`
+		Term   uint64         `json:"term"`
+		Index  uint64         `json:"index"` // Index is virtual (because of possible compaction)
+		RSMCmd machine.RSMcmd `json:"rsm"`
 	}
 
-	LogEntryPack = []*LogEntry
+	LogEntryPack = []LogEntry
 
 	// Append-only log with compaction abillity
 	// There is no errors in interface, caller should provide correct call semantic
@@ -37,8 +36,12 @@ type (
 		Term(index uint64) uint64
 
 		// Leader election
-		LastTerm() uint64
+		LastEntry() *LogEntry
 
 		Destroy()
 	}
 )
+
+func EmptyPack() LogEntryPack {
+	return LogEntryPack{}
+}

@@ -1,7 +1,6 @@
 package infra_test
 
 import (
-	"context"
 	"sync"
 	"testing"
 
@@ -19,18 +18,18 @@ func TestQueue(t *testing.T) {
 	t.Run("Just Work", func(t *testing.T) {
 		q := &infra.Queue{}
 		counter := 0
-		q.Append(infra.FormNode(func(ctx context.Context) {
+		q.Append(infra.FormNode(func() {
 			counter++
 		}, nil))
-		q.Append(infra.FormNode(func(ctx context.Context) {
+		q.Append(infra.FormNode(func() {
 			counter++
 		}, nil))
-		q.Append(infra.FormNode(func(ctx context.Context) {
+		q.Append(infra.FormNode(func() {
 			counter++
 		}, nil))
 		b := q.GrabAll()
 		for b.IsNotEmpty() {
-			b.Pop().Run(context.Background())
+			b.Pop().Run()
 		}
 		assert.Equal(t, 3, counter)
 	})
@@ -45,7 +44,7 @@ func TestQueue(t *testing.T) {
 			for range gosInGroup {
 				go func() {
 					defer wg.Done()
-					q.Append(infra.FormNode(func(ctx context.Context) {
+					q.Append(infra.FormNode(func() {
 						count++
 					}, nil))
 				}()
@@ -53,7 +52,7 @@ func TestQueue(t *testing.T) {
 			wg.Wait()
 			b := q.GrabAll()
 			for b.IsNotEmpty() {
-				b.Pop().Run(context.Background())
+				b.Pop().Run()
 			}
 			assert.Equal(t, gosInGroup, count)
 			count = 0
@@ -72,7 +71,7 @@ func TestQueue(t *testing.T) {
 					defer func() {
 						sig <- struct{}{}
 					}()
-					q.Append(infra.FormNode(func(ctx context.Context) {
+					q.Append(infra.FormNode(func() {
 						count++
 					}, nil))
 				}()
@@ -94,7 +93,7 @@ func TestQueue(t *testing.T) {
 					}
 					b := q.GrabAll()
 					for b.IsNotEmpty() {
-						b.Pop().Run(context.Background())
+						b.Pop().Run()
 					}
 
 				}
@@ -117,7 +116,7 @@ func BenchmarkQueue(b *testing.B) {
 				sig <- struct{}{}
 			}()
 			for range b.N {
-				q.Append(infra.FormNode(func(ctx context.Context) {
+				q.Append(infra.FormNode(func() {
 					count++
 				}, nil))
 			}
@@ -140,7 +139,7 @@ func BenchmarkQueue(b *testing.B) {
 			}
 			b := q.GrabAll()
 			for b.IsNotEmpty() {
-				b.Pop().Run(context.Background())
+				b.Pop().Run()
 			}
 
 		}
@@ -152,15 +151,15 @@ func BenchmarkQueue(b *testing.B) {
 
 func TestStrand(t *testing.T) {
 	t.Run("Just Work", func(t *testing.T) {
-		s := infra.NewStrand(context.Background())
+		s := infra.NewStrand()
 		crits := 0
-		s.Combine(func(ctx context.Context) {
+		s.Combine(func() {
 			crits++
 		})
-		s.Combine(func(ctx context.Context) {
+		s.Combine(func() {
 			crits++
 		})
-		s.Combine(func(ctx context.Context) {
+		s.Combine(func() {
 			crits++
 		})
 		s.Await()
@@ -170,11 +169,11 @@ func TestStrand(t *testing.T) {
 
 	// TSAN required
 	t.Run("Highload", func(t *testing.T) {
-		s := infra.NewStrand(context.Background())
+		s := infra.NewStrand()
 		crits := 0
 		for range goGroups {
 			for range gosInGroup {
-				s.Combine(func(ctx context.Context) {
+				s.Combine(func() {
 					crits++
 				})
 			}
@@ -187,10 +186,10 @@ func TestStrand(t *testing.T) {
 }
 
 func BenchmarkStrand(b *testing.B) {
-	s := infra.NewStrand(context.Background())
+	s := infra.NewStrand()
 	crits := 0
 	for range b.N {
-		s.Combine(func(ctx context.Context) {
+		s.Combine(func() {
 			crits++
 		})
 	}
