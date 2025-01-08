@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/bakalover/raft/infra"
@@ -54,7 +53,7 @@ func NewRaft(c *Config) *Raft {
 		strand:         infra.NewStrand(),
 		me:             c.Me,
 		neighbours:     make(map[string]*rpc.Client),
-		neighboursNum:  len(c.Neighbours),
+		neighboursNum:  len(c.Neighbours), // evade TSAN
 		role:           Follower,
 		log:            fileLog,
 		term:           fileLog.LastEntry().Term, // No need in separate term in persistence??
@@ -78,12 +77,11 @@ func (r *Raft) Run() {
 	rpc.Register(r)
 	rpc.HandleHTTP()
 
-	wg := new(sync.WaitGroup)
-	defer wg.Wait()
+	awaitServer := make(chan struct{}, 1)
+	defer func() { <-awaitServer }()
 
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
+		defer close(awaitServer)
 		r.logger.Println(http.ListenAndServe(r.me, nil))
 	}()
 
@@ -127,7 +125,7 @@ func (r *Raft) setTerm(newTerm uint64) {
 	r.logger.Printf("New term: %d", r.term)
 }
 
-func (r *Raft) Park() {
+func (r *Raft) Park() { // Should success
 	r.strand.Await()
 }
 
@@ -357,13 +355,13 @@ func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) 
 		}
 		localPrevTerm := r.log.At(args.PrevIndex).Term
 		if localPrevTerm == 0 && r.log.Size() != 0 && args.PrevIndex != 0 { // Not Found
+			replyToChannel.NextIndexHint = r.log.LastEntry().Index + 1
 			replyToChannel.Success = false
 			return
 		}
 		r.doResetTimer()
 		if r.leader != args.Leader {
 			r.leader = args.Leader
-			r.logger.Printf("New Leader: [%s]", r.leader)
 		}
 		if r.log.Size() == 0 && args.PrevIndex != 0 {
 			replyToChannel.Success = false
@@ -373,13 +371,12 @@ func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) 
 		if localPrevTerm != args.PrevTerm && args.PrevIndex != 0 {
 			r.log.TrimS(args.PrevIndex)
 		}
-		r.logger.Println("APPEND")
 		r.log.Append(args.Entries, args.PrevIndex+1)
 		replyToChannel.Success = true
 		replyToChannel.NextIndexHint = r.log.LastEntry().Index + 1 // Renew hint
 		if args.LeaderCommit > r.commitIndex && len(args.Entries) == 0 {
 			for i := r.commitIndex + 1; i <= args.LeaderCommit; i++ {
-				r.applyToStateMachine(i) // safe
+				r.applyToStateMachine(i) // Safe
 			}
 			r.commitIndex = args.LeaderCommit
 			return
@@ -434,7 +431,7 @@ func (r *Raft) applyToStateMachine(index uint64) (result machine.MachineType) {
 // Under strand context
 func (r *Raft) respondClient(response machine.MachineType) {
 	var responseChannel chan *RaftReply
-	if len(r.clientResponse) == 0 { // Rewind wait -> need to fix =( + snapshots
+	if len(r.clientResponse) == 0 { // Rewind wait on init -> need to fix =( + snapshots
 		return
 	}
 	responseChannel, r.clientResponse = r.clientResponse[0], r.clientResponse[1:] // Pop first client
@@ -487,16 +484,25 @@ func (r *Raft) doAppendEntries(entries persistence.LogEntryPack) {
 						Peer  string
 					}{&replyToChannel, peer}
 				}()
-				prevIndex := r.nextIndex[peer] - 1
-				prevTerm := <-infra.CombineAndGet(r.strand, func(replyChannel chan<- uint64) { replyChannel <- r.log.Term(prevIndex) })
-				if prevIndex == 0 {
-					prevTerm = 0
-				}
+				precedingEntry := <-infra.CombineAndGet(r.strand, func(replyChannel chan<- *persistence.LogEntry) {
+					if len(entries) == 0 { // heartbeat
+						replyChannel <- r.log.LastEntry()
+					} else { // replication, leader already appended new entry, so we should step back on 1
+						size := r.log.Size()
+						if size <= 1 { // At(0) [aka last entry] == At(1) iff r.log.Size() == 1
+							replyChannel <- &persistence.LogEntry{}
+						} else {
+							at := r.log.At(size - 1)
+							log.Printf("%+v", at)
+							replyChannel <- at // entry before last (just appended) entry
+						}
+					}
+				})
 				args := AppendEntriesArgs{
 					Term:         r.term,
 					Leader:       r.me,
-					PrevTerm:     prevTerm,
-					PrevIndex:    prevIndex,
+					PrevTerm:     precedingEntry.Term,
+					PrevIndex:    precedingEntry.Index,
 					Entries:      entries,
 					LeaderCommit: r.commitIndex,
 				}
@@ -517,7 +523,7 @@ func (r *Raft) doAppendEntries(entries persistence.LogEntryPack) {
 						// AppendEntries fails because of log inconsistency
 						r.logger.Printf("AppendEntries to peer: [%s] failed. Observed peer's log inconsistency. NextIndexHint: [%d]", peer, replyToChannel.NextIndexHint)
 						var additionalEntries persistence.LogEntryPack
-						for index := replyToChannel.NextIndexHint; index <= prevIndex; index++ { // Batch grab optimization?
+						for index := replyToChannel.NextIndexHint; index <= precedingEntry.Index; index++ { // Batch grab optimization?
 							entry := <-infra.CombineAndGet(r.strand, func(replyChannel chan<- *persistence.LogEntry) { replyChannel <- r.log.At(index) })
 							additionalEntries = append(additionalEntries, *entry)
 						}

@@ -9,17 +9,17 @@ import (
 )
 
 func main() {
-	client, err := rpc.DialHTTP("tcp", ":8081")
+	client, err := rpc.DialHTTP("tcp", ":8085")
 	if err != nil {
 		panic(err.Error())
 	}
 	args := machine.RSMcmd{
-		CMD: machine.Get,
+		CMD: machine.Add,
 		Xid: machine.Xid{
 			Client: "hiiim",
 			Index:  1,
 		},
-		// Arg: 2,
+		Arg: 2,
 	}
 	reply := new(raft.RaftReply)
 	err = client.Call("Raft.Apply", args, reply)
