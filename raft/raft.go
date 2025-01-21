@@ -182,6 +182,7 @@ func (r *Raft) Apply(args machine.RSMcmd, reply *RaftReply) error {
 					proxyReply = RaftReply{
 						Error: err,
 					}
+					r.doReconnect(r.leader)
 				}
 			}()
 		case Candidate:
@@ -311,7 +312,7 @@ func (r *Raft) doElection() {
 		}
 	}
 
-	if votes >= r.quorum {
+	if votes >= r.quorum-1 {
 		changeToLeader := func() {
 			if r.whoAmI() == Follower { // Someone took advantage on AppendEntries
 				return
@@ -551,7 +552,7 @@ func (r *Raft) doAppendEntries(entries persistence.LogEntryPack) {
 			backoffTerm = doReply.Reply.Term
 		}
 	}
-	if successCount >= r.quorum {
+	if successCount >= r.quorum-1 {
 		updatePeerState := func() {
 			for peer, index := range newNextIndex {
 				r.nextIndex[peer] = index
