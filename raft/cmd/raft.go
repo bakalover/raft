@@ -16,5 +16,4 @@ func main() {
 	}
 	instance := raft.NewRaft(&config)
 	instance.Run()
-	// instance.Park()
 }
