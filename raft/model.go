@@ -11,6 +11,7 @@ type (
 	RaftReply struct {
 		Error    error               `json:"error,omitempty"`
 		Response machine.MachineType `json:"reply,omitempty"`
+		Leader   string              `jsong:"leader,omitempty"`
 	}
 
 	RequestVoteArgs struct {

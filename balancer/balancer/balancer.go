@@ -18,11 +18,12 @@ type (
 
 	IBalancer interface {
 		Run()
-		Balance(machine.RSMcmd) (error, *raft.RaftReply)
+		Balance(machine.RSMcmd) (error, string)
 		Reconnect(peer string)
 		SetStrategy(Strategy)
 		SetAddrs(addrs []string)
-		SetLeader(leader *rpc.Client)
+		SetLeader(leader string)
+		Destroy()
 	}
 
 	balancer struct {
@@ -77,7 +78,14 @@ func (b *balancer) Run() {
 	}
 }
 
-func (b *balancer) Balance(request machine.RSMcmd) (error, *raft.RaftReply) {
+func (b *balancer) Destroy() {
+	if b.cancel != nil {
+		b.cancel()
+		b.cmds.Wait()
+	}
+}
+
+func (b *balancer) Balance(request machine.RSMcmd) (error, string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	reply := new(raft.RaftReply)
@@ -100,7 +108,8 @@ func (b *balancer) Balance(request machine.RSMcmd) (error, *raft.RaftReply) {
 	case Random:
 		peer = b.peers[rand.Intn(len(b.peers))]
 	}
-	return peer.Call("Raft.Apply", request, reply), reply
+	log.Printf("%+v", reply)
+	return peer.Call("Raft.Apply", request, reply), reply.Leader
 }
 
 func (b *balancer) SetStrategy(s Strategy) {
@@ -113,10 +122,7 @@ func (b *balancer) SetAddrs(addrs []string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if b.cancel != nil {
-		b.cancel()
-		b.cmds.Wait()
-	}
+	b.Destroy()
 
 	b.addrs = addrs
 	b.peers = make([]*rpc.Client, len(addrs))
@@ -134,10 +140,14 @@ func (b *balancer) connect(pos int, addr string) {
 	b.peers[pos] = client
 }
 
-func (b *balancer) SetLeader(leader *rpc.Client) {
+func (b *balancer) SetLeader(leader string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.leaderCache = leader
+	for i, addr := range b.addrs {
+		if addr == leader {
+			b.leaderCache = b.peers[i]
+		}
+	}
 }
 
 func (b *balancer) Reconnect(peer string) {

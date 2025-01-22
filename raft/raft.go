@@ -174,6 +174,7 @@ func (r *Raft) Apply(args machine.RSMcmd, reply *RaftReply) error {
 			r.logger.Printf("I am not a leader. Redirecting to [%s]", r.leader)
 			go func() {
 				var proxyReply RaftReply
+				proxyReply.Leader = r.leader
 				defer func() {
 					replyChannel <- &proxyReply
 				}()
